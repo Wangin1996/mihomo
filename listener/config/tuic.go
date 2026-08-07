@@ -11,6 +11,7 @@ type TuicServer struct {
 	Listen                string            `yaml:"listen" json:"listen"`
 	Token                 []string          `yaml:"token" json:"token,omitempty"`
 	Users                 map[string]string `yaml:"users" json:"users,omitempty"`
+	Usernames             map[string]string `yaml:"usernames" json:"usernames,omitempty"`
 	Certificate           string            `yaml:"certificate" json:"certificate"`
 	PrivateKey            string            `yaml:"private-key" json:"private-key"`
 	ClientAuthType        string            `yaml:"client-auth-type" json:"client-auth-type,omitempty"`

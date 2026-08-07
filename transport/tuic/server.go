@@ -29,6 +29,7 @@ type ServerOption struct {
 	QuicConfig            *quic.Config
 	Tokens                [][32]byte          // V4 special
 	Users                 map[[16]byte]string // V5 special
+	Usernames             map[[16]byte]string // optional stable accounting identity
 	CongestionController  string
 	AuthenticationTimeout time.Duration
 	MaxUdpRelayPacketSize int
@@ -237,6 +238,7 @@ func NewServer(option *ServerOption, pc net.PacketConn) (*Server, error) {
 			HandleTcpFn:           option.HandleTcpFn,
 			HandleUdpFn:           option.HandleUdpFn,
 			Users:                 option.Users,
+			Usernames:             option.Usernames,
 			MaxUdpRelayPacketSize: maxUdpRelayPacketSize,
 		}
 	}

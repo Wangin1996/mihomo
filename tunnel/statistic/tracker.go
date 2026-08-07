@@ -1,6 +1,7 @@
 package statistic
 
 import (
+	"context"
 	"io"
 	"net"
 	"time"
@@ -12,6 +13,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/gofrs/uuid/v5"
+	"golang.org/x/time/rate"
 )
 
 type Tracker interface {
@@ -37,6 +39,7 @@ type tcpTracker struct {
 	C.Conn `json:"-"`
 	*TrackerInfo
 	manager *Manager
+	limiter *rate.Limiter
 
 	pushToManager bool `json:"-"`
 }
@@ -51,7 +54,9 @@ func (tt *tcpTracker) Info() *TrackerInfo {
 
 func (tt *tcpTracker) Read(b []byte) (int, error) {
 	n, err := tt.Conn.Read(b)
+	waitRate(tt.limiter, n)
 	download := int64(n)
+	tt.manager.pushUserDownloaded(tt.manager.UserKey(tt.Metadata), download)
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
 	}
@@ -61,7 +66,9 @@ func (tt *tcpTracker) Read(b []byte) (int, error) {
 
 func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 	err = tt.Conn.ReadBuffer(buffer)
+	waitRate(tt.limiter, buffer.Len())
 	download := int64(buffer.Len())
+	tt.manager.pushUserDownloaded(tt.manager.UserKey(tt.Metadata), download)
 	if tt.pushToManager {
 		tt.manager.PushDownloaded(download)
 	}
@@ -71,6 +78,8 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 
 func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(download int64) {
+		waitRate(tt.limiter, int(download))
+		tt.manager.pushUserDownloaded(tt.manager.UserKey(tt.Metadata), download)
 		if tt.pushToManager {
 			tt.manager.PushDownloaded(download)
 		}
@@ -79,8 +88,10 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 }
 
 func (tt *tcpTracker) Write(b []byte) (int, error) {
+	waitRate(tt.limiter, len(b))
 	n, err := tt.Conn.Write(b)
 	upload := int64(n)
+	tt.manager.pushUserUploaded(tt.manager.UserKey(tt.Metadata), upload)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
 	}
@@ -90,7 +101,9 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 
 func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 	upload := int64(buffer.Len())
+	waitRate(tt.limiter, int(upload))
 	err = tt.Conn.WriteBuffer(buffer)
+	tt.manager.pushUserUploaded(tt.manager.UserKey(tt.Metadata), upload)
 	if tt.pushToManager {
 		tt.manager.PushUploaded(upload)
 	}
@@ -100,6 +113,8 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 
 func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 	return tt.Conn, []N.CountFunc{func(upload int64) {
+		waitRate(tt.limiter, int(upload))
+		tt.manager.pushUserUploaded(tt.manager.UserKey(tt.Metadata), upload)
 		if tt.pushToManager {
 			tt.manager.PushUploaded(upload)
 		}
@@ -122,6 +137,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 	t := &tcpTracker{
 		Conn:    conn,
 		manager: manager,
+		limiter: manager.limiterForUser(manager.UserKey(metadata)),
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),
@@ -157,6 +173,7 @@ type udpTracker struct {
 	C.PacketConn `json:"-"`
 	*TrackerInfo
 	manager *Manager
+	limiter *rate.Limiter
 
 	pushToManager bool `json:"-"`
 }
@@ -171,7 +188,9 @@ func (ut *udpTracker) Info() *TrackerInfo {
 
 func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 	n, addr, err := ut.PacketConn.ReadFrom(b)
+	waitRate(ut.limiter, n)
 	download := int64(n)
+	ut.manager.pushUserDownloaded(ut.manager.UserKey(ut.Metadata), download)
 	if ut.pushToManager {
 		ut.manager.PushDownloaded(download)
 	}
@@ -181,7 +200,9 @@ func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
 
 func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, err error) {
 	data, put, addr, err = ut.PacketConn.WaitReadFrom()
+	waitRate(ut.limiter, len(data))
 	download := int64(len(data))
+	ut.manager.pushUserDownloaded(ut.manager.UserKey(ut.Metadata), download)
 	if ut.pushToManager {
 		ut.manager.PushDownloaded(download)
 	}
@@ -190,8 +211,10 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 }
 
 func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
+	waitRate(ut.limiter, len(b))
 	n, err := ut.PacketConn.WriteTo(b, addr)
 	upload := int64(n)
+	ut.manager.pushUserUploaded(ut.manager.UserKey(ut.Metadata), upload)
 	if ut.pushToManager {
 		ut.manager.PushUploaded(upload)
 	}
@@ -214,6 +237,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 	ut := &udpTracker{
 		PacketConn: conn,
 		manager:    manager,
+		limiter:    manager.limiterForUser(manager.UserKey(metadata)),
 		TrackerInfo: &TrackerInfo{
 			UUID:          utils.NewUUIDV4(),
 			Start:         time.Now(),
@@ -243,4 +267,24 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 
 	manager.Join(ut)
 	return ut
+}
+
+// waitRate chunks large buffers because rate.Limiter rejects WaitN calls
+// larger than its configured burst. This keeps throttling effective for
+// multiplexed and UDP transports as well as ordinary TCP buffers.
+func waitRate(limiter *rate.Limiter, size int) {
+	if limiter == nil || size <= 0 || limiter.Limit() == rate.Inf {
+		return
+	}
+	ctx := context.Background()
+	for size > 0 {
+		chunk := size
+		if burst := limiter.Burst(); burst > 0 && chunk > burst {
+			chunk = burst
+		}
+		if err := limiter.WaitN(ctx, chunk); err != nil {
+			return
+		}
+		size -= chunk
+	}
 }

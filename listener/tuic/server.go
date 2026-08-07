@@ -167,10 +167,16 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 	}
 	if len(config.Users) > 0 {
 		users := make(map[[16]byte]string)
+		usernames := make(map[[16]byte]string)
 		for _uuid, password := range config.Users {
-			users[uuid.FromStringOrNil(_uuid)] = password
+			parsedUUID := uuid.FromStringOrNil(_uuid)
+			users[parsedUUID] = password
+			if username := config.Usernames[_uuid]; username != "" {
+				usernames[parsedUUID] = username
+			}
 		}
 		option.Users = users
+		option.Usernames = usernames
 	}
 
 	sl := &Listener{false, config, nil, nil}

@@ -47,6 +47,7 @@ func Handle(conn net.Conn, tunnel C.Tunnel, request *mierumodel.Request, additio
 		inbound.ApplyAdditions(
 			metadata,
 			inbound.WithInName(conn.(mierucommon.UserContext).UserName()),
+			inbound.WithInUser(conn.(mierucommon.UserContext).UserName()),
 			inbound.WithSrcAddr(conn.RemoteAddr()),
 			inbound.WithInAddr(conn.LocalAddr()),
 		)

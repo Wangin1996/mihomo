@@ -10,6 +10,7 @@ type ShadowsocksServer struct {
 	Enable     bool
 	Listen     string
 	Password   string
+	Users      map[string]string
 	Cipher     string
 	Udp        bool
 	MuxOption  sing.MuxOption `yaml:"mux-option" json:"mux-option,omitempty"`

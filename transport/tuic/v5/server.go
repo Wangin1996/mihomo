@@ -24,6 +24,7 @@ type ServerOption struct {
 	HandleUdpFn func(addr socks5.Addr, packet C.UDPPacket, additions ...inbound.Addition) error
 
 	Users                 map[[16]byte]string
+	Usernames             map[[16]byte]string
 	MaxUdpRelayPacketSize int
 }
 
@@ -170,7 +171,11 @@ func (s *serverHandler) HandleUniStream(reader *bufio.Reader) (err error) {
 				_ = s.quicConn.CloseWithError(AuthenticationFailed, "AuthenticationFailed")
 			}
 			s.authOk.Store(authOk)
-			s.authUUID.Store(authUUID.String())
+			identity := authUUID.String()
+			if username := s.Usernames[authUUID]; username != "" {
+				identity = username
+			}
+			s.authUUID.Store(identity)
 			close(s.authCh)
 		})
 	case PacketType:

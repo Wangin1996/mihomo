@@ -27,6 +27,7 @@ import (
 	"github.com/metacubex/sing/common/auth"
 	"github.com/metacubex/sing/common/buf"
 	"github.com/metacubex/sing/common/bufio"
+	E "github.com/metacubex/sing/common/exceptions"
 	M "github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/sing/common/network"
 )
@@ -36,8 +37,15 @@ type Listener struct {
 	config       LC.ShadowsocksServer
 	listeners    []net.Listener
 	udpListeners []net.PacketConn
-	service      shadowsocks.Service
+	service      serverService
 	simpleObfs   func(net.Conn) net.Conn
+}
+
+type serverService interface {
+	Name() string
+	network.TCPConnectionHandler
+	network.UDPHandler
+	E.Handler
 }
 
 var _listener *Listener
@@ -71,6 +79,22 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	sl.config = config
 
 	switch {
+	case len(config.Users) > 0 && common.Contains(shadowaead.List, config.Cipher):
+		service, serviceErr := shadowaead.NewMultiService[string](config.Cipher, udpTimeout, h)
+		if serviceErr == nil {
+			users, passwords := splitUsers(config.Users)
+			serviceErr = service.UpdateUsersWithPasswords(users, passwords)
+		}
+		sl.service, err = service, serviceErr
+	case len(config.Users) > 0 && common.Contains(shadowaead_2022.List, config.Cipher):
+		service, serviceErr := shadowaead_2022.NewMultiServiceWithPassword[string](config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+		if serviceErr == nil {
+			users, passwords := splitUsers(config.Users)
+			serviceErr = service.UpdateUsersWithPasswords(users, passwords)
+		}
+		sl.service, err = service, serviceErr
+	case len(config.Users) > 0:
+		return nil, fmt.Errorf("shadowsocks: method %s does not support multi-user service", config.Cipher)
 	case config.Cipher == shadowsocks.MethodNone:
 		sl.service = shadowsocks.NewNoneService(udpTimeout, h)
 	case common.Contains(shadowaead.List, config.Cipher):
@@ -231,6 +255,16 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	}
 
 	return sl, nil
+}
+
+func splitUsers(users map[string]string) ([]string, []string) {
+	names := make([]string, 0, len(users))
+	passwords := make([]string, 0, len(users))
+	for name, password := range users {
+		names = append(names, name)
+		passwords = append(passwords, password)
+	}
+	return names, passwords
 }
 
 func (l *Listener) Close() error {

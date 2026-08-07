@@ -13,6 +13,7 @@ type TuicOption struct {
 	BaseOption
 	Token                 []string          `inbound:"token,omitempty"`
 	Users                 map[string]string `inbound:"users,omitempty"`
+	Usernames             map[string]string `inbound:"usernames,omitempty"`
 	Certificate           string            `inbound:"certificate"`
 	PrivateKey            string            `inbound:"private-key"`
 	ClientAuthType        string            `inbound:"client-auth-type,omitempty"`
@@ -52,6 +53,7 @@ func NewTuic(options *TuicOption) (*Tuic, error) {
 			Listen:                base.RawAddress(),
 			Token:                 options.Token,
 			Users:                 options.Users,
+			Usernames:             options.Usernames,
 			Certificate:           options.Certificate,
 			PrivateKey:            options.PrivateKey,
 			ClientAuthType:        options.ClientAuthType,

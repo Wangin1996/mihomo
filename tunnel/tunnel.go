@@ -457,6 +457,21 @@ func handleUDPConn(packet C.PacketAdapter) {
 
 			_ = preHandleMetadata(metadata) // error was pre-checked
 
+			user := statistic.DefaultManager.UserKey(metadata)
+			sourceIP := metadata.SrcIP.String()
+			admissionHeld := false
+			if user != "" {
+				if !statistic.DefaultManager.AdmitUser(user, sourceIP) {
+					return nil, nil, fmt.Errorf("device limit reached for user %s", user)
+				}
+				admissionHeld = true
+				defer func() {
+					if admissionHeld {
+						statistic.DefaultManager.ReleaseUserAdmission(user, sourceIP)
+					}
+				}()
+			}
+
 			proxy, rule, err := resolveMetadata(metadata)
 			if err != nil {
 				log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
@@ -477,6 +492,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 			logMetadata(metadata, rule, rawPc)
 
 			pc := statistic.NewUDPTracker(rawPc, statistic.DefaultManager, metadata, rule, 0, 0, true)
+			admissionHeld = false // tracker.Join consumed the reservation
 
 			sender.AddMapping(originMetadata, dialMetadata)
 			oAddrPort := dialMetadata.AddrPort()
@@ -538,6 +554,22 @@ func handleTCPConn(connCtx C.ConnContext) {
 		log.Debugln("[Metadata PreHandle] failed to sniff a domain for connection %s --> %s, give up",
 			metadata.SourceDetail(), metadata.RemoteAddress())
 		return
+	}
+
+	user := statistic.DefaultManager.UserKey(metadata)
+	sourceIP := metadata.SrcIP.String()
+	admissionHeld := false
+	if user != "" {
+		if !statistic.DefaultManager.AdmitUser(user, sourceIP) {
+			log.Warnln("[UserLimit] reject %s from %s: device limit reached", user, sourceIP)
+			return
+		}
+		admissionHeld = true
+		defer func() {
+			if admissionHeld {
+				statistic.DefaultManager.ReleaseUserAdmission(user, sourceIP)
+			}
+		}()
 	}
 
 	peekMutex := sync.Mutex{}
@@ -613,6 +645,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 	logMetadata(metadata, rule, remoteConn)
 
 	remoteConn = statistic.NewTCPTracker(remoteConn, statistic.DefaultManager, metadata, rule, int64(peekLen), 0, true)
+	admissionHeld = false // tracker.Join consumed the reservation
 	defer func(remoteConn C.Conn) {
 		_ = remoteConn.Close()
 	}(remoteConn)

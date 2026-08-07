@@ -54,7 +54,7 @@ var (
 	tproxyMux  sync.Mutex
 	mixedMux   sync.Mutex
 	tunnelMux  sync.Mutex
-	inboundMux sync.Mutex
+	inboundMux sync.RWMutex
 	tunMux     sync.Mutex
 	ssMux      sync.Mutex
 	vmessMux   sync.Mutex
@@ -653,6 +653,14 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 	}
 }
 
+// GetInbound returns the named inbound listener, allowing embedded consumers
+// to verify that a config apply actually bound its socket.
+func GetInbound(name string) C.InboundListener {
+	inboundMux.RLock()
+	defer inboundMux.RUnlock()
+	return inboundListeners[name]
+}
+
 // GetPorts return the ports of proxy servers
 func GetPorts() *Ports {
 	ports := &Ports{}
@@ -725,5 +733,95 @@ func closeTunListener() {
 }
 
 func Cleanup() {
+	inboundMux.Lock()
+	for name, l := range inboundListeners {
+		_ = l.Close()
+		delete(inboundListeners, name)
+	}
+	inboundMux.Unlock()
+
+	socksMux.Lock()
+	if socksListener != nil {
+		_ = socksListener.Close()
+		socksListener = nil
+	}
+	if socksUDPListener != nil {
+		_ = socksUDPListener.Close()
+		socksUDPListener = nil
+	}
+	socksMux.Unlock()
+
+	httpMux.Lock()
+	if httpListener != nil {
+		_ = httpListener.Close()
+		httpListener = nil
+	}
+	httpMux.Unlock()
+
+	redirMux.Lock()
+	if redirListener != nil {
+		_ = redirListener.Close()
+		redirListener = nil
+	}
+	if redirUDPListener != nil {
+		_ = redirUDPListener.Close()
+		redirUDPListener = nil
+	}
+	redirMux.Unlock()
+
+	tproxyMux.Lock()
+	if tproxyListener != nil {
+		_ = tproxyListener.Close()
+		tproxyListener = nil
+	}
+	if tproxyUDPListener != nil {
+		_ = tproxyUDPListener.Close()
+		tproxyUDPListener = nil
+	}
+	tproxyMux.Unlock()
+
+	mixedMux.Lock()
+	if mixedListener != nil {
+		_ = mixedListener.Close()
+		mixedListener = nil
+	}
+	if mixedUDPLister != nil {
+		_ = mixedUDPLister.Close()
+		mixedUDPLister = nil
+	}
+	mixedMux.Unlock()
+
+	ssMux.Lock()
+	if shadowSocksListener != nil {
+		_ = shadowSocksListener.Close()
+		shadowSocksListener = nil
+	}
+	ssMux.Unlock()
+
+	vmessMux.Lock()
+	if vmessListener != nil {
+		_ = vmessListener.Close()
+		vmessListener = nil
+	}
+	vmessMux.Unlock()
+
+	tuicMux.Lock()
+	if tuicListener != nil {
+		_ = tuicListener.Close()
+		tuicListener = nil
+	}
+	tuicMux.Unlock()
+
+	tunnelMux.Lock()
+	for key, l := range tunnelTCPListeners {
+		_ = l.Close()
+		delete(tunnelTCPListeners, key)
+	}
+	for key, l := range tunnelUDPListeners {
+		_ = l.Close()
+		delete(tunnelUDPListeners, key)
+	}
+	tunnelMux.Unlock()
+
 	closeTunListener()
 }
