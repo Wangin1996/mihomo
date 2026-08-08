@@ -11,15 +11,21 @@ import (
 
 type ShadowSocksOption struct {
 	BaseOption
-	Password   string     `inbound:"password"`
-	Cipher     string     `inbound:"cipher"`
-	UDP        bool       `inbound:"udp,omitempty"`
-	MuxOption  MuxOption  `inbound:"mux-option,omitempty"`
-	ShadowTLS  ShadowTLS  `inbound:"shadow-tls,omitempty"`
-	ResTLS     ResTLS     `inbound:"res-tls,omitempty"`
-	JLSConfig  JLSConfig  `inbound:"jls-config,omitempty"`
-	KcpTun     KcpTun     `inbound:"kcp-tun,omitempty"`
-	SimpleObfs SimpleObfs `inbound:"simple-obfs,omitempty"`
+	Password   string            `inbound:"password"`
+	Cipher     string            `inbound:"cipher"`
+	Users      []ShadowSocksUser `inbound:"users,omitempty"`
+	UDP        bool              `inbound:"udp,omitempty"`
+	MuxOption  MuxOption         `inbound:"mux-option,omitempty"`
+	ShadowTLS  ShadowTLS         `inbound:"shadow-tls,omitempty"`
+	ResTLS     ResTLS            `inbound:"res-tls,omitempty"`
+	JLSConfig  JLSConfig         `inbound:"jls-config,omitempty"`
+	KcpTun     KcpTun            `inbound:"kcp-tun,omitempty"`
+	SimpleObfs SimpleObfs        `inbound:"simple-obfs,omitempty"`
+}
+
+type ShadowSocksUser struct {
+	Username string `inbound:"username"`
+	Password string `inbound:"password"`
 }
 
 type SimpleObfs struct {
@@ -50,6 +56,10 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 	if err != nil {
 		return nil, err
 	}
+	users := make([]LC.ShadowsocksUser, len(options.Users))
+	for i, user := range options.Users {
+		users[i] = LC.ShadowsocksUser{Username: user.Username, Password: user.Password}
+	}
 	return &ShadowSocks{
 		Base:   base,
 		config: options,
@@ -58,6 +68,7 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 			Listen:     base.RawAddress(),
 			Password:   options.Password,
 			Cipher:     options.Cipher,
+			Users:      users,
 			Udp:        options.UDP,
 			MuxOption:  options.MuxOption.Build(),
 			ShadowTLS:  options.ShadowTLS.Build(),
