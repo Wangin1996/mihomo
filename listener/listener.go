@@ -42,6 +42,7 @@ var (
 	tunnelTCPListeners  = map[string]*LT.Listener{}
 	tunnelUDPListeners  = map[string]*LT.PacketConn{}
 	inboundListeners    = map[string]C.InboundListener{}
+	lastInboundErrors   []error
 	tunLister           *sing_tun.Listener
 	shadowSocksListener C.MultiAddrListener
 	vmessListener       *sing_vmess.Listener
@@ -627,17 +628,20 @@ func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C.Tunnel, dropOld bool) {
 	inboundMux.Lock()
 	defer inboundMux.Unlock()
+	lastInboundErrors = nil
 
 	for name, newListener := range newListenerMap {
 		if oldListener, ok := inboundListeners[name]; ok {
 			if !oldListener.Config().Equal(newListener.Config()) {
 				_ = oldListener.Close()
+				delete(inboundListeners, name)
 			} else {
 				continue
 			}
 		}
 		if err := newListener.Listen(tunnel); err != nil {
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
+			lastInboundErrors = append(lastInboundErrors, fmt.Errorf("listener %s: %w", name, err))
 			continue
 		}
 		inboundListeners[name] = newListener
@@ -651,6 +655,13 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 			}
 		}
 	}
+}
+
+// LastInboundErrors returns listener failures from the most recent config apply.
+func LastInboundErrors() []error {
+	inboundMux.Lock()
+	defer inboundMux.Unlock()
+	return append([]error(nil), lastInboundErrors...)
 }
 
 // GetPorts return the ports of proxy servers

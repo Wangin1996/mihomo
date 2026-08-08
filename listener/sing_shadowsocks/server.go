@@ -36,8 +36,13 @@ type Listener struct {
 	config       LC.ShadowsocksServer
 	listeners    []net.Listener
 	udpListeners []net.PacketConn
-	service      shadowsocks.Service
+	service      shadowsocksService
 	simpleObfs   func(net.Conn) net.Conn
+}
+
+type shadowsocksService interface {
+	NewConnection(context.Context, net.Conn, M.Metadata) error
+	NewPacket(context.Context, network.PacketConn, *buf.Buffer, M.Metadata) error
 }
 
 var _listener *Listener
@@ -70,13 +75,38 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	sl = &Listener{}
 	sl.config = config
 
+	usernames := make([]string, 0, len(config.Users))
+	passwords := make([]string, 0, len(config.Users))
+	for _, user := range config.Users {
+		usernames = append(usernames, user.Username)
+		passwords = append(passwords, user.Password)
+	}
+
 	switch {
 	case config.Cipher == shadowsocks.MethodNone:
 		sl.service = shadowsocks.NewNoneService(udpTimeout, h)
 	case common.Contains(shadowaead.List, config.Cipher):
-		sl.service, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, h)
+		if len(config.Users) == 0 {
+			sl.service, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, h)
+		} else {
+			var service *shadowaead.MultiService[string]
+			service, err = shadowaead.NewMultiService[string](config.Cipher, udpTimeout, h)
+			if err == nil {
+				err = service.UpdateUsersWithPasswords(usernames, passwords)
+				sl.service = service
+			}
+		}
 	case common.Contains(shadowaead_2022.List, config.Cipher):
-		sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+		if len(config.Users) == 0 {
+			sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+		} else {
+			var service *shadowaead_2022.MultiService[string]
+			service, err = shadowaead_2022.NewMultiServiceWithPassword[string](config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+			if err == nil {
+				err = service.UpdateUsersWithPasswords(usernames, passwords)
+				sl.service = service
+			}
+		}
 	default:
 		err = fmt.Errorf("shadowsocks: unsupported method: %s", config.Cipher)
 		return embedSS.New(config, lc, tunnel, additions...)
