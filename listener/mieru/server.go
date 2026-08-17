@@ -17,6 +17,7 @@ import (
 )
 
 func Handle(conn net.Conn, tunnel C.Tunnel, request *mierumodel.Request, additions ...inbound.Addition) {
+	user := conn.(mierucommon.UserContext).UserName()
 	// Return a fake response to the client.
 	resp := &mierumodel.Response{
 		Reply: mieruconstant.Socks5ReplySuccess,
@@ -46,7 +47,7 @@ func Handle(conn net.Conn, tunnel C.Tunnel, request *mierumodel.Request, additio
 		}
 		inbound.ApplyAdditions(
 			metadata,
-			inbound.WithInName(conn.(mierucommon.UserContext).UserName()),
+			inbound.WithInUser(user),
 			inbound.WithSrcAddr(conn.RemoteAddr()),
 			inbound.WithInAddr(conn.LocalAddr()),
 		)
@@ -78,7 +79,8 @@ func Handle(conn net.Conn, tunnel C.Tunnel, request *mierumodel.Request, additio
 				payload: payload,
 				put:     put,
 			}
-			tunnel.HandleUDPPacket(inbound.NewPacket(target, packet, C.MIERU, additions...))
+			packetAdditions := append(append([]inbound.Addition(nil), additions...), inbound.WithInUser(user))
+			tunnel.HandleUDPPacket(inbound.NewPacket(target, packet, C.MIERU, packetAdditions...))
 		}
 	}
 }
