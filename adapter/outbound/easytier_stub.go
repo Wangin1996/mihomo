@@ -1,4 +1,4 @@
-//go:build no_easytier
+//go:build !with_easytier
 
 package outbound
 

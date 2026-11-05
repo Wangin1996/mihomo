@@ -2,7 +2,7 @@ package constant
 
 var (
 	Meta       = true
-	Version    = "1.19.33-xboard.1"
+	Version    = "1.19.33-xboard.2"
 	BuildTime  = "unknown time"
 	MihomoName = "mihomo"
 )
