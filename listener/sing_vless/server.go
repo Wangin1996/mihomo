@@ -318,6 +318,19 @@ func (l *Listener) Config() string {
 	return l.config.String()
 }
 
+func (l *Listener) UpdateUsers(users []LC.VlessUser) {
+	userNames := make([]string, 0, len(users))
+	userUUIDs := make([]string, 0, len(users))
+	userFlows := make([]string, 0, len(users))
+	for _, user := range users {
+		userNames = append(userNames, user.Username)
+		userUUIDs = append(userUUIDs, user.UUID)
+		userFlows = append(userFlows, user.Flow)
+	}
+	l.service.UpdateUsers(userNames, userUUIDs, userFlows)
+	l.config.Users = append([]LC.VlessUser(nil), users...)
+}
+
 func (l *Listener) AddrList() (addrList []net.Addr) {
 	for _, lis := range l.listeners {
 		addrList = append(addrList, lis.Addr())

@@ -167,4 +167,37 @@ func (v *Vless) Close() error {
 	return v.l.Close()
 }
 
+func (v *Vless) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*VlessOption)
+	if !ok || !sameVlessStatic(v.config, next) {
+		return false, nil
+	}
+	listener, ok := v.l.(*sing_vless.Listener)
+	if !ok || listener == nil {
+		return false, nil
+	}
+	users := append([]VlessUser(nil), next.Users...)
+	listenerUsers := make([]LC.VlessUser, 0, len(users))
+	for _, user := range users {
+		listenerUsers = append(listenerUsers, LC.VlessUser{
+			Username: user.Username,
+			UUID:     user.UUID,
+			Flow:     user.Flow,
+		})
+	}
+	listener.UpdateUsers(listenerUsers)
+	v.config.Users = users
+	v.vs.Users = listenerUsers
+	return true, nil
+}
+
+func sameVlessStatic(left, right *VlessOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
 var _ C.InboundListener = (*Vless)(nil)
+var _ C.InboundUserUpdater = (*Vless)(nil)

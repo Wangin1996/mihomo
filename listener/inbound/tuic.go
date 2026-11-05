@@ -101,4 +101,37 @@ func (t *Tuic) Close() error {
 	return t.l.Close()
 }
 
+func (t *Tuic) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*TuicOption)
+	if !ok || !sameTuicStatic(t.config, next) {
+		return false, nil
+	}
+	listener := t.l
+	if listener == nil {
+		return false, nil
+	}
+	users := cloneTuicUsers(next.Users)
+	listener.UpdateUsers(users)
+	t.config.Users = users
+	t.ts.Users = cloneTuicUsers(users)
+	return true, nil
+}
+
+func sameTuicStatic(left, right *TuicOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
+func cloneTuicUsers(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 var _ C.InboundListener = (*Tuic)(nil)
+var _ C.InboundUserUpdater = (*Tuic)(nil)

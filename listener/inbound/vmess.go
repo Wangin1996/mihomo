@@ -117,4 +117,48 @@ func (v *Vmess) Close() error {
 	return v.l.Close()
 }
 
+func (v *Vmess) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*VmessOption)
+	if !ok || !sameVmessStatic(v.config, next) || hasVmessAlterIDs(v.config.Users) || hasVmessAlterIDs(next.Users) {
+		return false, nil
+	}
+	listener, ok := v.l.(*sing_vmess.Listener)
+	if !ok || listener == nil {
+		return false, nil
+	}
+	users := append([]VmessUser(nil), next.Users...)
+	listenerUsers := make([]LC.VmessUser, 0, len(users))
+	for _, user := range users {
+		listenerUsers = append(listenerUsers, LC.VmessUser{
+			Username: user.Username,
+			UUID:     user.UUID,
+			AlterID:  user.AlterID,
+		})
+	}
+	if err := listener.UpdateUsers(listenerUsers); err != nil {
+		return false, err
+	}
+	v.config.Users = users
+	v.vs.Users = listenerUsers
+	return true, nil
+}
+
+func sameVmessStatic(left, right *VmessOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
+func hasVmessAlterIDs(users []VmessUser) bool {
+	for _, user := range users {
+		if user.AlterID != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 var _ C.InboundListener = (*Vmess)(nil)
+var _ C.InboundUserUpdater = (*Vmess)(nil)

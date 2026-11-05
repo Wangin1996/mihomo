@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -37,7 +38,9 @@ type Listener struct {
 	closed    bool
 	config    LC.VmessServer
 	listeners []net.Listener
+	handler   *sing.ListenerHandler
 	service   *vmess.Service[string]
+	usersMu   sync.RWMutex
 }
 
 var _listener *Listener
@@ -90,7 +93,7 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		return nil, err
 	}
 
-	sl = &Listener{false, config, nil, service}
+	sl = &Listener{config: config, handler: h, service: service}
 
 	httpServer := http.Server{
 		IdleTimeout: 30 * time.Second,
@@ -313,7 +316,10 @@ func (l *Listener) Close() error {
 			retErr = err
 		}
 	}
-	err := l.service.Close()
+	l.usersMu.RLock()
+	service := l.service
+	l.usersMu.RUnlock()
+	err := service.Close()
 	if err != nil {
 		retErr = err
 	}
@@ -322,6 +328,33 @@ func (l *Listener) Close() error {
 
 func (l *Listener) Config() string {
 	return l.config.String()
+}
+
+func (l *Listener) UpdateUsers(users []LC.VmessUser) error {
+	userNames := make([]string, 0, len(users))
+	userUUIDs := make([]string, 0, len(users))
+	alterIDs := make([]int, 0, len(users))
+	for _, user := range users {
+		userNames = append(userNames, user.Username)
+		userUUIDs = append(userUUIDs, user.UUID)
+		alterIDs = append(alterIDs, user.AlterID)
+	}
+	service := vmess.NewService[string](l.handler, vmess.ServiceWithDisableHeaderProtection(), vmess.ServiceWithTimeFunc(ntp.Now))
+	if err := service.UpdateUsers(userNames, userUUIDs, alterIDs); err != nil {
+		return err
+	}
+	if err := service.Start(); err != nil {
+		return err
+	}
+	l.usersMu.Lock()
+	oldService := l.service
+	l.service = service
+	l.config.Users = append([]LC.VmessUser(nil), users...)
+	l.usersMu.Unlock()
+	if oldService != nil {
+		_ = oldService.Close()
+	}
+	return nil
 }
 
 func (l *Listener) AddrList() (addrList []net.Addr) {
@@ -333,7 +366,10 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 
 func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	ctx := sing.WithAdditions(context.TODO(), additions...)
-	err := l.service.NewConnection(ctx, conn, metadata.Metadata{
+	l.usersMu.RLock()
+	service := l.service
+	l.usersMu.RUnlock()
+	err := service.NewConnection(ctx, conn, metadata.Metadata{
 		Protocol: "vmess",
 		Source:   metadata.SocksaddrFromNet(conn.RemoteAddr()),
 	})

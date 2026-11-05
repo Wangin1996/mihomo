@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -41,6 +42,7 @@ type Server struct {
 	optionV4 *v4.ServerOption
 	optionV5 *v5.ServerOption
 	listener *quic.EarlyListener
+	usersMu  sync.RWMutex
 }
 
 func (s *Server) Serve() error {
@@ -67,6 +69,20 @@ func (s *Server) Serve() error {
 
 func (s *Server) Close() error {
 	return s.listener.Close()
+}
+
+func (s *Server) UpdateUsers(users map[[16]byte]string) {
+	updated := make(map[[16]byte]string, len(users))
+	for user, password := range users {
+		updated[user] = password
+	}
+	s.usersMu.Lock()
+	s.Users = updated
+	if s.optionV5 != nil {
+		s.optionV5.Users = updated
+		s.optionV5.UsersMu = &s.usersMu
+	}
+	s.usersMu.Unlock()
 }
 
 type serverHandler struct {
@@ -228,7 +244,7 @@ func NewServer(option *ServerOption, pc net.PacketConn) (*Server, error) {
 			MaxUdpRelayPacketSize: option.MaxUdpRelayPacketSize,
 		}
 	}
-	if len(option.Users) > 0 {
+	if len(option.Users) > 0 || len(option.Tokens) == 0 {
 		maxUdpRelayPacketSize := option.MaxUdpRelayPacketSize
 		if maxUdpRelayPacketSize > MaxFragSizeV5 {
 			maxUdpRelayPacketSize = MaxFragSizeV5
@@ -237,6 +253,7 @@ func NewServer(option *ServerOption, pc net.PacketConn) (*Server, error) {
 			HandleTcpFn:           option.HandleTcpFn,
 			HandleUdpFn:           option.HandleUdpFn,
 			Users:                 option.Users,
+			UsersMu:               &server.usersMu,
 			MaxUdpRelayPacketSize: maxUdpRelayPacketSize,
 		}
 	}

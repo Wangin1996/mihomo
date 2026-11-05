@@ -22,6 +22,7 @@ import (
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/slowdown"
 	"github.com/metacubex/mihomo/component/sniffer"
+	"github.com/metacubex/mihomo/component/xboard"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/constant/features"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -430,6 +431,10 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	if !xboard.CanOpen(metadata.InName, metadata.InUser, metadata.SrcIP.String()) {
+		packet.Drop()
+		return
+	}
 
 	if err := preHandleMetadata(metadata.Clone()); err != nil { // precheck without modify metadata
 		packet.Drop()
@@ -515,6 +520,9 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+	if !xboard.CanOpen(metadata.InName, metadata.InUser, metadata.SrcIP.String()) {
+		return
+	}
 
 	preHandleFailed := false
 	if err := preHandleMetadata(metadata); err != nil {

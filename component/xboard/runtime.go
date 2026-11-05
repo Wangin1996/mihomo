@@ -139,8 +139,52 @@ type Connection struct {
 
 // Open reserves the source IP and registers an authenticated connection.
 // Unconfigured scopes are allowed and returned without an accounting handle.
+func CanOpen(scope, alias, sourceIP string) bool {
+	if scope == "" {
+		return true
+	}
+
+	runtimeState.mu.Lock()
+	state := runtimeState.scopes[scope]
+	if state == nil {
+		runtimeState.mu.Unlock()
+		return true
+	}
+	if alias == "" {
+		runtimeState.mu.Unlock()
+		return false
+	}
+	user, ok := state.users[alias]
+	if !ok {
+		runtimeState.mu.Unlock()
+		return false
+	}
+	stats := state.stats[user.ID]
+	if stats == nil {
+		stats = &userStats{ips: make(map[string]int)}
+		state.stats[user.ID] = stats
+	}
+
+	limit := 0
+	if state.deviceLimit != nil {
+		if configured, enabled := state.deviceLimit(user.UUID); enabled {
+			limit = configured
+		}
+	}
+	if !canAdmitLocked(user.ID, sourceIP, limit, state, stats) {
+		event := state.limitEvent
+		runtimeState.mu.Unlock()
+		if event != nil {
+			event()
+		}
+		return false
+	}
+	runtimeState.mu.Unlock()
+	return true
+}
+
 func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, bool) {
-	if scope == "" || alias == "" {
+	if scope == "" {
 		return nil, true
 	}
 
@@ -149,6 +193,10 @@ func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, boo
 	if state == nil {
 		runtimeState.mu.Unlock()
 		return nil, true
+	}
+	if alias == "" {
+		runtimeState.mu.Unlock()
+		return nil, false
 	}
 	user, ok := state.users[alias]
 	if !ok {
@@ -185,11 +233,14 @@ func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, boo
 	return &Connection{id: id, ref: ref}, true
 }
 
-func admitLocked(userID int, sourceIP string, limit int, state *scopeState, stats *userStats) bool {
+func canAdmitLocked(userID int, sourceIP string, limit int, state *scopeState, stats *userStats) bool {
 	if sourceIP == "" {
 		sourceIP = "unknown"
 	}
-	if limit > 0 && stats.ips[sourceIP] == 0 {
+	stats.mu.RLock()
+	activeCount := stats.ips[sourceIP]
+	stats.mu.RUnlock()
+	if limit > 0 && activeCount == 0 {
 		seen := make(map[string]struct{})
 		for _, scope := range runtimeState.scopes {
 			if scopedStats := scope.stats[userID]; scopedStats != nil {
@@ -208,6 +259,16 @@ func admitLocked(userID int, sourceIP string, limit int, state *scopeState, stat
 		if _, exists := seen[sourceIP]; !exists && len(seen) >= limit {
 			return false
 		}
+	}
+	return true
+}
+
+func admitLocked(userID int, sourceIP string, limit int, state *scopeState, stats *userStats) bool {
+	if sourceIP == "" {
+		sourceIP = "unknown"
+	}
+	if !canAdmitLocked(userID, sourceIP, limit, state, stats) {
+		return false
 	}
 	stats.mu.Lock()
 	stats.connections++

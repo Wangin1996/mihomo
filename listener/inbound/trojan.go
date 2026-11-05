@@ -124,4 +124,36 @@ func (v *Trojan) Close() error {
 	return v.l.Close()
 }
 
+func (v *Trojan) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*TrojanOption)
+	if !ok || !sameTrojanStatic(v.config, next) {
+		return false, nil
+	}
+	listener, ok := v.l.(*trojan.Listener)
+	if !ok || listener == nil {
+		return false, nil
+	}
+	users := append([]TrojanUser(nil), next.Users...)
+	listenerUsers := make([]LC.TrojanUser, 0, len(users))
+	for _, user := range users {
+		listenerUsers = append(listenerUsers, LC.TrojanUser{
+			Username: user.Username,
+			Password: user.Password,
+		})
+	}
+	listener.UpdateUsers(listenerUsers)
+	v.config.Users = users
+	v.vs.Users = listenerUsers
+	return true, nil
+}
+
+func sameTrojanStatic(left, right *TrojanOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
 var _ C.InboundListener = (*Trojan)(nil)
+var _ C.InboundUserUpdater = (*Trojan)(nil)

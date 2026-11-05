@@ -24,6 +24,7 @@ type ServerOption struct {
 	HandleUdpFn func(addr socks5.Addr, packet C.UDPPacket, additions ...inbound.Addition) error
 
 	Users                 map[[16]byte]string
+	UsersMu               *sync.RWMutex
 	MaxUdpRelayPacketSize int
 }
 
@@ -155,7 +156,14 @@ func (s *serverHandler) HandleUniStream(reader *bufio.Reader) (err error) {
 		authOk := false
 		var authUUID uuid.UUID
 		var token [32]byte
-		if password, ok := s.Users[authenticate.UUID]; ok {
+		if s.UsersMu != nil {
+			s.UsersMu.RLock()
+		}
+		password, ok := s.Users[authenticate.UUID]
+		if s.UsersMu != nil {
+			s.UsersMu.RUnlock()
+		}
+		if ok {
 			token, err = GenToken(s.quicConn.ConnectionState(), authenticate.UUID, password)
 			if err != nil {
 				return

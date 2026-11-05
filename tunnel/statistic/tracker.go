@@ -169,6 +169,12 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 		return t
 	}
 
+	if uploadTotal > 0 {
+		t.xboard.AddUpload(uploadTotal)
+	}
+	if downloadTotal > 0 {
+		t.xboard.AddDownload(downloadTotal)
+	}
 	if pushToManager {
 		if uploadTotal > 0 {
 			manager.PushUploaded(uploadTotal)
@@ -292,6 +298,12 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 		return ut
 	}
 
+	if uploadTotal > 0 {
+		ut.xboard.AddUpload(uploadTotal)
+	}
+	if downloadTotal > 0 {
+		ut.xboard.AddDownload(downloadTotal)
+	}
 	if pushToManager {
 		if uploadTotal > 0 {
 			manager.PushUploaded(uploadTotal)

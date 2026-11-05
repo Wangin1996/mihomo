@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -37,6 +38,7 @@ type Listener struct {
 	config     LC.TrojanServer
 	listeners  []net.Listener
 	keys       map[[trojan.KeyLength]byte]string
+	keysMu     sync.RWMutex
 	pickCipher core.Cipher
 	handler    *sing.ListenerHandler
 }
@@ -76,7 +78,12 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			return nil, err
 		}
 	}
-	sl = &Listener{false, config, nil, keys, pickCipher, h}
+	sl = &Listener{
+		config:     config,
+		keys:       keys,
+		pickCipher: pickCipher,
+		handler:    h,
+	}
 
 	httpServer := http.Server{
 		IdleTimeout: 30 * time.Second,
@@ -255,6 +262,17 @@ func (l *Listener) Config() string {
 	return l.config.String()
 }
 
+func (l *Listener) UpdateUsers(users []LC.TrojanUser) {
+	keys := make(map[[trojan.KeyLength]byte]string, len(users))
+	for _, user := range users {
+		keys[trojan.Key(user.Password)] = user.Username
+	}
+	l.keysMu.Lock()
+	l.keys = keys
+	l.config.Users = append([]LC.TrojanUser(nil), users...)
+	l.keysMu.Unlock()
+}
+
 func (l *Listener) AddrList() (addrList []net.Addr) {
 	for _, lis := range l.listeners {
 		addrList = append(addrList, lis.Addr())
@@ -275,7 +293,10 @@ func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 		return
 	}
 
-	if user, ok := l.keys[key]; ok {
+	l.keysMu.RLock()
+	user, ok := l.keys[key]
+	l.keysMu.RUnlock()
+	if ok {
 		additions = append(additions, inbound.WithInUser(user))
 	} else {
 		//log.Warnln("no such key")

@@ -78,3 +78,26 @@ func TestConfigureScopeClosesRemovedCredentials(t *testing.T) {
 		t.Fatal("retired user stats were not released after final snapshot")
 	}
 }
+
+func TestManagedScopeRejectsEmptyAndUnknownAlias(t *testing.T) {
+	const scope = "node-test-auth"
+	defer RemoveScope(scope)
+
+	if !CanOpen("unmanaged-scope", "", "1.1.1.1") {
+		t.Fatal("unmanaged scope with empty alias should be allowed")
+	}
+	if _, ok := Open("u1", "unmanaged-scope", "", "1.1.1.1", &testCloser{}); !ok {
+		t.Fatal("unmanaged scope Open with empty alias should be allowed")
+	}
+
+	ConfigureScope(scope, map[string]User{"valid": {ID: 1, UUID: "valid"}}, nil, nil, nil)
+	if CanOpen(scope, "", "1.1.1.1") {
+		t.Fatal("managed scope must reject empty alias in CanOpen")
+	}
+	if _, ok := Open("m1", scope, "", "1.1.1.1", &testCloser{}); ok {
+		t.Fatal("managed scope must reject empty alias in Open")
+	}
+	if CanOpen(scope, "unknown", "1.1.1.1") {
+		t.Fatal("managed scope must reject unknown alias in CanOpen")
+	}
+}
