@@ -73,6 +73,27 @@ func (s *Socks) Close() error {
 	return nil
 }
 
+func (s *Socks) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*SocksOption)
+	if !ok || !sameSocksStatic(s.config, next) || !canUpdateAuthUsers(s.config.Users, next.Users) || len(s.stl) == 0 {
+		return false, nil
+	}
+	store := next.Users.GetAuthStore()
+	for _, listener := range s.stl {
+		listener.UpdateAuthStore(store)
+	}
+	s.config.Users = cloneAuthUsers(next.Users)
+	return true, nil
+}
+
+func sameSocksStatic(left, right *SocksOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
 // Address implements constant.InboundListener
 func (s *Socks) Address() string {
 	var addrList []string
@@ -116,3 +137,4 @@ func (s *Socks) Listen(tunnel C.Tunnel) error {
 }
 
 var _ C.InboundListener = (*Socks)(nil)
+var _ C.InboundUserUpdater = (*Socks)(nil)

@@ -103,7 +103,44 @@ func (m *Mieru) Close() error {
 	return nil
 }
 
+func (m *Mieru) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*MieruOption)
+	if !ok || !sameMieruStatic(m.option, next) || len(next.Users) == 0 {
+		return false, nil
+	}
+	nextCopy := *next
+	nextCopy.Users = cloneMieruUsers(next.Users)
+	serverConfig, err := buildMieruServerConfig(&nextCopy, m.ports)
+	if err != nil {
+		return false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.server.Store(serverConfig); err != nil {
+		return false, err
+	}
+	m.option.Users = cloneMieruUsers(next.Users)
+	return true, nil
+}
+
+func sameMieruStatic(left, right *MieruOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
+func cloneMieruUsers(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 var _ C.InboundListener = (*Mieru)(nil)
+var _ C.InboundUserUpdater = (*Mieru)(nil)
 
 func (o MieruOption) Equal(config C.InboundConfig) bool {
 	return optionToString(o) == optionToString(config)

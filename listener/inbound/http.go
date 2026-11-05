@@ -101,4 +101,26 @@ func (h *HTTP) Close() error {
 	return nil
 }
 
+func (h *HTTP) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*HTTPOption)
+	if !ok || !sameHTTPStatic(h.config, next) || !canUpdateAuthUsers(h.config.Users, next.Users) || len(h.l) == 0 {
+		return false, nil
+	}
+	store := next.Users.GetAuthStore()
+	for _, listener := range h.l {
+		listener.UpdateAuthStore(store)
+	}
+	h.config.Users = cloneAuthUsers(next.Users)
+	return true, nil
+}
+
+func sameHTTPStatic(left, right *HTTPOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
 var _ C.InboundListener = (*HTTP)(nil)
+var _ C.InboundUserUpdater = (*HTTP)(nil)

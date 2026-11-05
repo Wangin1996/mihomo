@@ -93,4 +93,37 @@ func (v *AnyTLS) Close() error {
 	return v.l.Close()
 }
 
+func (v *AnyTLS) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*AnyTLSOption)
+	if !ok || !sameAnyTLSStatic(v.config, next) {
+		return false, nil
+	}
+	listener, ok := v.l.(*anytls.Listener)
+	if !ok || listener == nil {
+		return false, nil
+	}
+	users := cloneAnyTLSUsers(next.Users)
+	listener.UpdateUsers(users)
+	v.config.Users = users
+	v.vs.Users = cloneAnyTLSUsers(users)
+	return true, nil
+}
+
+func sameAnyTLSStatic(left, right *AnyTLSOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
+func cloneAnyTLSUsers(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 var _ C.InboundListener = (*AnyTLS)(nil)
+var _ C.InboundUserUpdater = (*AnyTLS)(nil)

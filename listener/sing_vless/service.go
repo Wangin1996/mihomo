@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/transport/vless"
@@ -24,6 +25,7 @@ import (
 )
 
 type Service[T comparable] struct {
+	mu       sync.RWMutex
 	userMap  map[[16]byte]T
 	userFlow map[T]string
 	handler  Handler
@@ -44,13 +46,22 @@ func NewService[T comparable](handler Handler) *Service[T] {
 func (s *Service[T]) UpdateUsers(userList []T, userUUIDList []string, userFlowList []string) {
 	userMap := make(map[[16]byte]T)
 	userFlowMap := make(map[T]string)
-	for i, userName := range userList {
+	limit := len(userList)
+	if len(userUUIDList) < limit {
+		limit = len(userUUIDList)
+	}
+	if len(userFlowList) < limit {
+		limit = len(userFlowList)
+	}
+	for i, userName := range userList[:limit] {
 		userID := utils.UUIDMap(userUUIDList[i])
 		userMap[userID] = userName
 		userFlowMap[userName] = userFlowList[i]
 	}
+	s.mu.Lock()
 	s.userMap = userMap
 	s.userFlow = userFlowMap
+	s.mu.Unlock()
 }
 
 var _ N.TCPConnectionHandler = (*Service[int])(nil)
@@ -105,14 +116,16 @@ func (s *Service[T]) NewConnection(ctx context.Context, conn net.Conn, metadata 
 		}
 	}
 
+	s.mu.RLock()
 	user, loaded := s.userMap[requestUUID]
+	userFlow := s.userFlow[user]
+	s.mu.RUnlock()
 	if !loaded {
 		return E.New("unknown UUID: ", uuid.FromBytesOrNil(requestUUID[:]))
 	}
 	ctx = auth.ContextWithUser(ctx, user)
 	metadata.Destination = destination
 
-	userFlow := s.userFlow[user]
 	requestFlow := addons.Flow
 	if requestFlow != userFlow && requestFlow != "" {
 		return E.New("flow mismatch: expected ", flowName(userFlow), ", but got ", flowName(requestFlow))

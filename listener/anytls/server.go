@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -35,6 +36,7 @@ type Listener struct {
 	listeners []net.Listener
 	tlsConfig *tls.Config
 	userMap   map[[32]byte]string
+	userMu    sync.RWMutex
 	padding   atomic.Pointer[padding.PaddingFactory]
 }
 
@@ -196,6 +198,25 @@ func (l *Listener) Config() string {
 	return l.config.String()
 }
 
+func (l *Listener) UpdateUsers(users map[string]string) {
+	userMap := make(map[[32]byte]string, len(users))
+	for user, password := range users {
+		userMap[sha256.Sum256([]byte(password))] = user
+	}
+	l.userMu.Lock()
+	l.userMap = userMap
+	l.config.Users = cloneAnyTLSUsers(users)
+	l.userMu.Unlock()
+}
+
+func cloneAnyTLSUsers(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 func (l *Listener) AddrList() (addrList []net.Addr) {
 	for _, lis := range l.listeners {
 		addrList = append(addrList, lis.Addr())
@@ -222,7 +243,10 @@ func (l *Listener) HandleConn(conn net.Conn, h *sing.ListenerHandler) {
 	}
 	var passwordSha256 [32]byte
 	copy(passwordSha256[:], by)
-	if user, ok := l.userMap[passwordSha256]; ok {
+	l.userMu.RLock()
+	user, ok := l.userMap[passwordSha256]
+	l.userMu.RUnlock()
+	if ok {
 		ctx = auth.ContextWithUser(ctx, user)
 	} else {
 		return

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/component/auth"
 	"github.com/metacubex/mihomo/component/ca"
 	"github.com/metacubex/mihomo/component/ech"
 	C "github.com/metacubex/mihomo/constant"
@@ -21,6 +23,8 @@ type Listener struct {
 	listener net.Listener
 	addr     string
 	closed   bool
+	authMu   sync.RWMutex
+	store    auth.AuthStore
 }
 
 // RawAddress implements C.Listener
@@ -122,6 +126,7 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 	hl := &Listener{
 		listener: l,
 		addr:     config.Listen,
+		store:    config.AuthStore,
 	}
 
 	go func() {
@@ -134,7 +139,9 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 				continue
 			}
 
-			store := config.AuthStore
+			hl.authMu.RLock()
+			store := hl.store
+			hl.authMu.RUnlock()
 			if isDefault || store == authStore.Default { // only apply on default listener
 				if !inbound.IsRemoteAddrDisAllowed(conn.RemoteAddr()) {
 					_ = conn.Close()
@@ -149,4 +156,10 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 	}()
 
 	return hl, nil
+}
+
+func (l *Listener) UpdateAuthStore(store auth.AuthStore) {
+	l.authMu.Lock()
+	l.store = store
+	l.authMu.Unlock()
 }

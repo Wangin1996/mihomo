@@ -633,6 +633,14 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 	for name, newListener := range newListenerMap {
 		if oldListener, ok := inboundListeners[name]; ok {
 			if !oldListener.Config().Equal(newListener.Config()) {
+				if updater, ok := oldListener.(C.InboundUserUpdater); ok {
+					updated, err := updater.UpdateUsers(newListener.Config())
+					if err != nil {
+						log.Warnln("Update listener %s users in place failed: %s", name, err.Error())
+					} else if updated {
+						continue
+					}
+				}
 				_ = oldListener.Close()
 				delete(inboundListeners, name)
 			} else {
@@ -655,6 +663,24 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 			}
 		}
 	}
+}
+
+func UpdateInboundUsers(name string, config C.InboundConfig) (bool, error) {
+	inboundMux.Lock()
+	defer inboundMux.Unlock()
+
+	oldListener, ok := inboundListeners[name]
+	if !ok || oldListener == nil {
+		return false, nil
+	}
+	if oldListener.Config().Equal(config) {
+		return true, nil
+	}
+	updater, ok := oldListener.(C.InboundUserUpdater)
+	if !ok {
+		return false, nil
+	}
+	return updater.UpdateUsers(config)
 }
 
 // LastInboundErrors returns listener failures from the most recent config apply.

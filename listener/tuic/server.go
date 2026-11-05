@@ -232,6 +232,25 @@ func (l *Listener) Config() LC.TuicServer {
 	return l.config
 }
 
+func (l *Listener) UpdateUsers(users map[string]string) {
+	updated := make(map[[16]byte]string, len(users))
+	for _uuid, password := range users {
+		updated[uuid.FromStringOrNil(_uuid)] = password
+	}
+	for _, server := range l.servers {
+		server.UpdateUsers(updated)
+	}
+	l.config.Users = cloneTuicUsers(users)
+}
+
+func cloneTuicUsers(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 func (l *Listener) AddrList() (addrList []net.Addr) {
 	for _, lis := range l.udpListeners {
 		addrList = append(addrList, lis.LocalAddr())

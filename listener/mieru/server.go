@@ -53,7 +53,7 @@ func Handle(conn net.Conn, tunnel C.Tunnel, request *mierumodel.Request, additio
 		inbound.ApplyAdditions(metadata, additions...)
 		tunnel.HandleTCPConn(conn, metadata)
 	case mieruconstant.Socks5UDPAssociateCmd: // UDP
-		additions = append(additions, inbound.WithInUser(user))
+		additions = append(append([]inbound.Addition(nil), additions...), inbound.WithInUser(user))
 		pc := mierucommon.NewPacketOverStreamTunnel(conn)
 		ep := N.NewEnhancePacketConn(pc)
 		defer ep.Close()

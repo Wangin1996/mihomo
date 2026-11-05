@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
+	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/common/sockopt"
@@ -37,12 +39,47 @@ type Listener struct {
 	listeners    []net.Listener
 	udpListeners []net.PacketConn
 	service      shadowsocksService
+	usersMu      sync.RWMutex
 	simpleObfs   func(net.Conn) net.Conn
 }
 
 type shadowsocksService interface {
 	NewConnection(context.Context, net.Conn, M.Metadata) error
 	NewPacket(context.Context, network.PacketConn, *buf.Buffer, M.Metadata) error
+}
+
+type handshakeUnlockKey struct{}
+
+type ssHandler struct {
+	*sing.ListenerHandler
+	defaultUser string
+}
+
+func (h *ssHandler) releaseHandshakeLock(ctx context.Context) context.Context {
+	if unlock, ok := ctx.Value(handshakeUnlockKey{}).(func()); ok && unlock != nil {
+		unlock()
+	}
+	if h.defaultUser != "" {
+		if _, loaded := auth.UserFromContext[string](ctx); !loaded {
+			ctx = auth.ContextWithUser(ctx, h.defaultUser)
+		}
+	}
+	return ctx
+}
+
+func (h *ssHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.Metadata) error {
+	ctx = h.releaseHandshakeLock(ctx)
+	return h.ListenerHandler.NewConnection(ctx, conn, metadata)
+}
+
+func (h *ssHandler) NewPacketConnection(ctx context.Context, conn network.PacketConn, metadata M.Metadata) error {
+	ctx = h.releaseHandshakeLock(ctx)
+	return h.ListenerHandler.NewPacketConnection(ctx, conn, metadata)
+}
+
+func (h *ssHandler) NewPacket(ctx context.Context, key netip.AddrPort, buffer *buf.Buffer, metadata M.Metadata, init func(natConn network.PacketConn) network.PacketWriter) {
+	ctx = h.releaseHandshakeLock(ctx)
+	h.ListenerHandler.NewPacket(ctx, key, buffer, metadata, init)
 }
 
 var _listener *Listener
@@ -82,26 +119,35 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 		passwords = append(passwords, user.Password)
 	}
 
+	defaultUser := ""
+	if config.Cipher == "2022-blake3-chacha20-poly1305" && len(config.Users) == 1 {
+		defaultUser = config.Users[0].Username
+	}
+	handler := &ssHandler{
+		ListenerHandler: h,
+		defaultUser:     defaultUser,
+	}
+
 	switch {
 	case config.Cipher == shadowsocks.MethodNone:
-		sl.service = shadowsocks.NewNoneService(udpTimeout, h)
+		sl.service = shadowsocks.NewNoneService(udpTimeout, handler)
 	case common.Contains(shadowaead.List, config.Cipher):
 		if len(config.Users) == 0 {
-			sl.service, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, h)
+			sl.service, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, handler)
 		} else {
 			var service *shadowaead.MultiService[string]
-			service, err = shadowaead.NewMultiService[string](config.Cipher, udpTimeout, h)
+			service, err = shadowaead.NewMultiService[string](config.Cipher, udpTimeout, handler)
 			if err == nil {
 				err = service.UpdateUsersWithPasswords(usernames, passwords)
 				sl.service = service
 			}
 		}
 	case common.Contains(shadowaead_2022.List, config.Cipher):
-		if len(config.Users) == 0 {
-			sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+		if len(config.Users) == 0 || config.Cipher == "2022-blake3-chacha20-poly1305" {
+			sl.service, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, handler, ntp.Now)
 		} else {
 			var service *shadowaead_2022.MultiService[string]
-			service, err = shadowaead_2022.NewMultiServiceWithPassword[string](config.Cipher, config.Password, udpTimeout, h, ntp.Now)
+			service, err = shadowaead_2022.NewMultiServiceWithPassword[string](config.Cipher, config.Password, udpTimeout, handler, ntp.Now)
 			if err == nil {
 				err = service.UpdateUsersWithPasswords(usernames, passwords)
 				sl.service = service
@@ -223,10 +269,12 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 					}
 					ctx := context.TODO()
 					ctx = sing.WithInAddr(ctx, ul.LocalAddr())
+					sl.usersMu.RLock()
 					_ = sl.service.NewPacket(ctx, conn, buff, M.Metadata{
 						Protocol: "shadowsocks",
 						Source:   dest,
 					})
+					sl.usersMu.RUnlock()
 				}
 			}()
 		}
@@ -285,6 +333,28 @@ func (l *Listener) Config() string {
 	return l.config.String()
 }
 
+func (l *Listener) UpdateUsers(users []LC.ShadowsocksUser) error {
+	updater, ok := l.service.(interface {
+		UpdateUsersWithPasswords(userList []string, passwordList []string) error
+	})
+	if !ok {
+		return fmt.Errorf("shadowsocks listener does not support multi-user updates")
+	}
+	usernames := make([]string, 0, len(users))
+	passwords := make([]string, 0, len(users))
+	for _, user := range users {
+		usernames = append(usernames, user.Username)
+		passwords = append(passwords, user.Password)
+	}
+	l.usersMu.Lock()
+	defer l.usersMu.Unlock()
+	if err := updater.UpdateUsersWithPasswords(usernames, passwords); err != nil {
+		return err
+	}
+	l.config.Users = append([]LC.ShadowsocksUser(nil), users...)
+	return nil
+}
+
 func (l *Listener) AddrList() (addrList []net.Addr) {
 	for _, lis := range l.listeners {
 		addrList = append(addrList, lis.Addr())
@@ -307,6 +377,13 @@ func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 	if loaded {
 		ctx = auth.ContextWithUser(ctx, user)
 	}
+	l.usersMu.RLock()
+	var unlockOnce sync.Once
+	unlock := func() {
+		unlockOnce.Do(l.usersMu.RUnlock)
+	}
+	defer unlock()
+	ctx = context.WithValue(ctx, handshakeUnlockKey{}, unlock)
 	err := l.service.NewConnection(ctx, conn, M.Metadata{
 		Protocol: "shadowsocks",
 		Source:   M.SocksaddrFromNet(conn.RemoteAddr()),

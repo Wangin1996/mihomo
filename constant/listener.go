@@ -26,6 +26,13 @@ type InboundListener interface {
 	Config() InboundConfig
 }
 
+// InboundUserUpdater updates authentication users without replacing the
+// listening sockets. Implementations must return false when the change also
+// modifies non-user listener settings or cannot be applied safely in place.
+type InboundUserUpdater interface {
+	UpdateUsers(config InboundConfig) (updated bool, err error)
+}
+
 type InboundConfig interface {
 	Name() string
 	Equal(config InboundConfig) bool
