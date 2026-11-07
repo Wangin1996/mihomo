@@ -24,7 +24,11 @@ func NewBase(options *BaseOption) (*Base, error) {
 	if options.Listen == "" {
 		options.Listen = "0.0.0.0"
 	}
-	addr, err := netip.ParseAddr(options.Listen)
+	rawListen := strings.TrimSpace(options.Listen)
+	if strings.EqualFold(rawListen, "all") || rawListen == "0.0.0.0,::" {
+		rawListen = "::"
+	}
+	addr, err := netip.ParseAddr(rawListen)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +129,16 @@ func (o BaseOption) ListenConfig() C.InboundListenConfig {
 	}
 	lc := inbound.NewListenConfig()
 	lc.SetRouteMark(o.RoutingMark)
+	rawListen := strings.TrimSpace(o.Listen)
+	if strings.EqualFold(rawListen, "all") || rawListen == "0.0.0.0,::" {
+		lc.SetListenMode("all")
+	} else if addr, err := netip.ParseAddr(rawListen); err == nil {
+		if addr.Is4() {
+			lc.SetListenMode("ipv4")
+		} else if addr.Is6() {
+			lc.SetListenMode("ipv6")
+		}
+	}
 	return lc
 }
 

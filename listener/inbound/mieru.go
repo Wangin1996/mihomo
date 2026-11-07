@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -191,9 +192,13 @@ func buildMieruServerConfig(option *MieruOption, ports utils.IntRanges[uint16]) 
 		}
 	}
 	lc := option.ListenConfig()
+	listenIP := strings.TrimSpace(option.Listen)
+	if strings.EqualFold(listenIP, "all") || listenIP == "0.0.0.0,::" {
+		listenIP = "::"
+	}
 	return &mieruserver.ServerConfig{
 		Config: &mierupb.ServerConfig{
-			ListenIPAddress:  proto.String(option.Listen),
+			ListenIPAddress:  proto.String(listenIP),
 			PortBindings:     portBindings,
 			Users:            users,
 			TrafficPattern:   trafficPattern,

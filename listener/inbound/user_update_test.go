@@ -1,7 +1,9 @@
 package inbound_test
 
 import (
+	"net"
 	"testing"
+	"time"
 
 	"github.com/metacubex/mihomo/listener/inbound"
 )
@@ -240,5 +242,106 @@ func TestInboundUpdateUsersSupportsAddAndRemove(t *testing.T) {
 		if ok, err := hl.UpdateUsers(&httpOpt2); err != nil || !ok {
 			t.Fatalf("http replace user failed: ok=%v err=%v", ok, err)
 		}
+	})
+}
+
+func TestInboundListenModeIsolation(t *testing.T) {
+	tunnel := NewHttpTestTunnel()
+	defer tunnel.Close()
+
+	u1 := "11111111-1111-1111-1111-111111111111"
+
+	t.Run("ipv6_only_rejects_ipv4", func(t *testing.T) {
+		opt := &inbound.VlessOption{
+			BaseOption:    inbound.BaseOption{NameStr: "vless-v6", Listen: "::", Port: "0"},
+			Users:         []inbound.VlessUser{{Username: u1, UUID: u1}},
+			Decryption:    "none",
+			AllowInsecure: true,
+		}
+		l, err := inbound.NewVless(opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Listen(tunnel); err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+
+		_, port, err := net.SplitHostPort(l.Address())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c4, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", port), 300*time.Millisecond); err == nil {
+			_ = c4.Close()
+			t.Fatalf("expected IPv4 dial to fail on IPv6-only listener (%s), but it succeeded", l.Address())
+		}
+		c6, err := net.DialTimeout("tcp6", net.JoinHostPort("::1", port), 500*time.Millisecond)
+		if err != nil {
+			t.Fatalf("expected IPv6 dial to succeed on IPv6-only listener (%s): %v", l.Address(), err)
+		}
+		_ = c6.Close()
+	})
+
+	t.Run("ipv4_only_rejects_ipv6", func(t *testing.T) {
+		opt := &inbound.VlessOption{
+			BaseOption:    inbound.BaseOption{NameStr: "vless-v4", Listen: "0.0.0.0", Port: "0"},
+			Users:         []inbound.VlessUser{{Username: u1, UUID: u1}},
+			Decryption:    "none",
+			AllowInsecure: true,
+		}
+		l, err := inbound.NewVless(opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Listen(tunnel); err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+
+		_, port, err := net.SplitHostPort(l.Address())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c6, err := net.DialTimeout("tcp6", net.JoinHostPort("::1", port), 300*time.Millisecond); err == nil {
+			_ = c6.Close()
+			t.Fatalf("expected IPv6 dial to fail on IPv4-only listener (%s), but it succeeded", l.Address())
+		}
+		c4, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+		if err != nil {
+			t.Fatalf("expected IPv4 dial to succeed on IPv4-only listener (%s): %v", l.Address(), err)
+		}
+		_ = c4.Close()
+	})
+
+	t.Run("dual_stack_accepts_both_ipv4_and_ipv6", func(t *testing.T) {
+		opt := &inbound.VlessOption{
+			BaseOption:    inbound.BaseOption{NameStr: "vless-dual", Listen: "0.0.0.0,::", Port: "0"},
+			Users:         []inbound.VlessUser{{Username: u1, UUID: u1}},
+			Decryption:    "none",
+			AllowInsecure: true,
+		}
+		l, err := inbound.NewVless(opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Listen(tunnel); err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+
+		_, port, err := net.SplitHostPort(l.Address())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c4, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+		if err != nil {
+			t.Fatalf("expected IPv4 dial to succeed on dual-stack listener (%s): %v", l.Address(), err)
+		}
+		_ = c4.Close()
+		c6, err := net.DialTimeout("tcp6", net.JoinHostPort("::1", port), 500*time.Millisecond)
+		if err != nil {
+			t.Fatalf("expected IPv6 dial to succeed on dual-stack listener (%s): %v", l.Address(), err)
+		}
+		_ = c6.Close()
 	})
 }
