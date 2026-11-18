@@ -2,11 +2,11 @@ package tproxy
 
 import (
 	"context"
+	"fmt"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/keepalive"
-	"github.com/metacubex/mihomo/component/mptcp"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/socks5"
 )
@@ -42,6 +42,10 @@ func (l *Listener) handleTProxy(conn net.Conn, tunnel C.Tunnel, additions ...inb
 }
 
 func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+	return NewWithConfig(addr, inbound.NewListenConfig(), tunnel, additions...)
+}
+
+func NewWithConfig(addr string, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TPROXY"),
@@ -50,21 +54,34 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	}
 	// Golang will then enable mptcp support for listeners by default when the major version of go.mod is 1.24 or higher.
 	// This can cause tproxy to malfunction on certain Linux kernel versions, so we force to disable mptcp for tproxy.
-	lc := net.ListenConfig{}
-	mptcp.SetNetListenConfig(&lc, false)
+	if ilc, ok := lc.(*inbound.ListenConfig); ok && ilc != nil {
+		copied := *ilc
+		copied.SetDisableMPTCP(true)
+		lc = &copied
+	} else if lc == nil {
+		ilc := inbound.NewListenConfig()
+		ilc.SetDisableMPTCP(true)
+		lc = ilc
+	}
 	l, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	tl := l.(*net.TCPListener)
+	tl, ok := l.(*net.TCPListener)
+	if !ok {
+		_ = l.Close()
+		return nil, fmt.Errorf("unexpected tproxy tcp listener type: %T", l)
+	}
 	rc, err := tl.SyscallConn()
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
-	err = setsockopt(rc, addr)
+	err = setsockopt(rc, l.Addr().String())
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 

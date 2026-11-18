@@ -1,6 +1,8 @@
 package tproxy
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/netip"
 
@@ -35,13 +37,20 @@ func (l *UDPListener) Close() error {
 }
 
 func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
+	return NewUDPWithConfig(addr, inbound.NewListenConfig(), tunnel, additions...)
+}
+
+func NewUDPWithConfig(addr string, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPListener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TPROXY"),
 			inbound.WithSpecialRules(""),
 		}
 	}
-	l, err := net.ListenPacket("udp", addr)
+	if lc == nil {
+		lc = inbound.NewListenConfig()
+	}
+	l, err := lc.ListenPacket(context.Background(), "udp", addr)
 	if err != nil {
 		return nil, err
 	}
@@ -51,15 +60,21 @@ func NewUDP(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*UDPLi
 		addr:       addr,
 	}
 
-	c := l.(*net.UDPConn)
+	c, ok := l.(*net.UDPConn)
+	if !ok {
+		_ = l.Close()
+		return nil, fmt.Errorf("unexpected tproxy udp conn type: %T", l)
+	}
 
 	rc, err := c.SyscallConn()
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 
-	err = setsockopt(rc, addr)
+	err = setsockopt(rc, c.LocalAddr().String())
 	if err != nil {
+		_ = l.Close()
 		return nil, err
 	}
 

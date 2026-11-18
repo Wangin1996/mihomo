@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/transport/vless"
@@ -130,6 +131,8 @@ func (s *Service[T]) NewConnection(ctx context.Context, conn net.Conn, metadata 
 	if requestFlow != userFlow && requestFlow != "" {
 		return E.New("flow mismatch: expected ", flowName(userFlow), ", but got ", flowName(requestFlow))
 	}
+
+	_ = conn.SetReadDeadline(time.Time{})
 
 	responseConn := &serverConn{ExtendedConn: bufio.NewExtendedConn(conn)}
 	switch requestFlow {

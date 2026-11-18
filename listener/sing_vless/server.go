@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -30,10 +31,14 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+const handshakeTimeout = 15 * time.Second
+
 type Listener struct {
 	closed     bool
 	config     LC.VlessServer
+	configMu   sync.RWMutex
 	listeners  []net.Listener
+	httpServer *http.Server
 	service    *Service[string]
 	decryption *encryption.ServerInstance
 }
@@ -45,6 +50,12 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			inbound.WithSpecialRules(""),
 		}
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.VLESS,
@@ -73,18 +84,11 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 	if err != nil {
 		return nil, err
 	}
-	if sl.decryption != nil {
-		decryption := sl.decryption
-		defer func() { // decryption must be closed to avoid the goroutine leak
-			if err != nil {
-				_ = decryption.Close()
-			}
-		}()
-	}
 
-	httpServer := http.Server{
-		IdleTimeout: 30 * time.Second,
-		Protocols:   new(http.Protocols),
+	httpServer := &http.Server{
+		ReadHeaderTimeout: handshakeTimeout,
+		IdleTimeout:       30 * time.Second,
+		Protocols:         new(http.Protocols),
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var shadowTLSBuilder *shadowtls.Builder
@@ -254,11 +258,15 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...)
 		}
 	}
+	if httpServer.Handler != nil {
+		sl.httpServer = httpServer
+	}
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
 		//TCP
-		l, err := lc.Listen(context.Background(), "tcp", addr)
+		var l net.Listener
+		l, err = lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
 		}
@@ -273,6 +281,7 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else if sl.decryption == nil && !config.AllowInsecure {
+			_ = l.Close()
 			return nil, errors.New("disallow using Vless without any certificates/shadow-tls/res-tls/jls/reality/decryption/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
@@ -283,8 +292,8 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 				return
 			}
 			for {
-				c, err := l.Accept()
-				if err != nil {
+				c, acceptErr := l.Accept()
+				if acceptErr != nil {
 					if sl.closed {
 						break
 					}
@@ -302,6 +311,11 @@ func New(config LC.VlessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 func (l *Listener) Close() error {
 	l.closed = true
 	var retErr error
+	if l.httpServer != nil {
+		if err := l.httpServer.Close(); err != nil {
+			retErr = err
+		}
+	}
 	for _, lis := range l.listeners {
 		err := lis.Close()
 		if err != nil {
@@ -315,6 +329,8 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() string {
+	l.configMu.RLock()
+	defer l.configMu.RUnlock()
 	return l.config.String()
 }
 
@@ -328,7 +344,9 @@ func (l *Listener) UpdateUsers(users []LC.VlessUser) {
 		userFlows = append(userFlows, user.Flow)
 	}
 	l.service.UpdateUsers(userNames, userUUIDs, userFlows)
+	l.configMu.Lock()
 	l.config.Users = append([]LC.VlessUser(nil), users...)
+	l.configMu.Unlock()
 }
 
 func (l *Listener) AddrList() (addrList []net.Addr) {
@@ -339,6 +357,7 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 }
 
 func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	ctx := sing.WithAdditions(context.TODO(), additions...)
 	if l.decryption != nil {
 		c, err := l.decryption.Handshake(conn, nil)

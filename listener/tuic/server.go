@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -29,17 +30,24 @@ const ServerMaxIncomingStreams = (1 << 32) - 1
 type Listener struct {
 	closed       bool
 	config       LC.TuicServer
+	configMu     sync.RWMutex
 	udpListeners []net.PacketConn
 	servers      []*tuic.Server
 }
 
-func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TUIC"),
 			inbound.WithSpecialRules(""),
 		}
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.TUIC,
@@ -173,18 +181,19 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 		option.Users = users
 	}
 
-	sl := &Listener{false, config, nil, nil}
+	sl = &Listener{config: config}
 
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
-		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
+		var ul net.PacketConn
+		ul, err = lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			return nil, err
 		}
 
-		if err := sockopt.UDPReuseaddr(ul); err != nil {
-			log.Warnln("Failed to Reuse UDP Address: %s", err)
+		if reuseErr := sockopt.UDPReuseaddr(ul); reuseErr != nil {
+			log.Warnln("Failed to Reuse UDP Address: %s", reuseErr)
 		}
 
 		sl.udpListeners = append(sl.udpListeners, ul)
@@ -198,8 +207,8 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 		sl.servers = append(sl.servers, server)
 
 		go func() {
-			err := server.Serve()
-			if err != nil {
+			sErr := server.Serve()
+			if sErr != nil {
 				if sl.closed {
 					return
 				}
@@ -229,6 +238,8 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() LC.TuicServer {
+	l.configMu.RLock()
+	defer l.configMu.RUnlock()
 	return l.config
 }
 
@@ -240,7 +251,9 @@ func (l *Listener) UpdateUsers(users map[string]string) {
 	for _, server := range l.servers {
 		server.UpdateUsers(updated)
 	}
+	l.configMu.Lock()
 	l.config.Users = cloneTuicUsers(users)
+	l.configMu.Unlock()
 }
 
 func cloneTuicUsers(users map[string]string) map[string]string {

@@ -99,6 +99,9 @@ func (t *Hysteria2RealmServer) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (t *Hysteria2RealmServer) Close() error {
+	if t.l == nil {
+		return nil
+	}
 	return t.l.Close()
 }
 

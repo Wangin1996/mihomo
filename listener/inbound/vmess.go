@@ -114,6 +114,9 @@ func (v *Vmess) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *Vmess) Close() error {
+	if v.l == nil {
+		return nil
+	}
 	return v.l.Close()
 }
 

@@ -58,7 +58,7 @@ var (
 	udpInOnce sync.Once
 
 	// Outbound Rule
-	mode = Rule
+	mode = atomic.NewInt32Enum(Rule)
 
 	// default timeout for UDP session
 	udpTimeout = 60 * time.Second
@@ -66,7 +66,7 @@ var (
 	findProcessMode = atomic.NewInt32Enum(process.FindProcessStrict)
 
 	snifferDispatcher *sniffer.Dispatcher
-	sniffingEnable    = false
+	sniffingEnable    = atomic.NewBool(false)
 
 	ruleUpdateCallback = utils.NewCallback[P.RuleProvider]()
 )
@@ -118,15 +118,15 @@ func (t tunnel) NatTable() C.NatTable {
 }
 
 func (t tunnel) Proxies() map[string]C.Proxy {
-	return proxies
+	return Proxies()
 }
 
 func (t tunnel) Providers() map[string]P.ProxyProvider {
-	return providers
+	return Providers()
 }
 
 func (t tunnel) RuleProviders() map[string]P.RuleProvider {
-	return ruleProviders
+	return RuleProviders()
 }
 
 func (t tunnel) RuleUpdateCallback() *utils.Callback[P.RuleProvider] {
@@ -150,15 +150,28 @@ func Status() TunnelStatus {
 }
 
 func SetSniffing(b bool) {
-	if snifferDispatcher.Enable() {
-		configMux.Lock()
-		sniffingEnable = b
-		configMux.Unlock()
+	configMux.Lock()
+	if snifferDispatcher != nil && snifferDispatcher.Enable() {
+		sniffingEnable.Store(b)
 	}
+	configMux.Unlock()
 }
 
 func IsSniffing() bool {
-	return sniffingEnable
+	return sniffingEnable.Load()
+}
+
+func currentSniffer() *sniffer.Dispatcher {
+	if !sniffingEnable.Load() {
+		return nil
+	}
+	configMux.RLock()
+	d := snifferDispatcher
+	configMux.RUnlock()
+	if d != nil && d.Enable() {
+		return d
+	}
+	return nil
 }
 
 // TCPIn return fan-in queue
@@ -196,10 +209,14 @@ func NatTable() C.NatTable {
 
 // Rules return all rules
 func Rules() []C.Rule {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return rules
 }
 
 func Listeners() map[string]C.InboundListener {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return listeners
 }
 
@@ -214,16 +231,22 @@ func UpdateRules(newRules []C.Rule, newSubRule map[string][]C.Rule, rp map[strin
 
 // Proxies return all proxies
 func Proxies() map[string]C.Proxy {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return proxies
 }
 
 // Providers return all compatible providers
 func Providers() map[string]P.ProxyProvider {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return providers
 }
 
 // RuleProviders return all loaded rule providers
 func RuleProviders() map[string]P.RuleProvider {
+	configMux.RLock()
+	defer configMux.RUnlock()
 	return ruleProviders
 }
 
@@ -244,18 +267,18 @@ func UpdateListeners(newListeners map[string]C.InboundListener) {
 func UpdateSniffer(dispatcher *sniffer.Dispatcher) {
 	configMux.Lock()
 	snifferDispatcher = dispatcher
-	sniffingEnable = dispatcher.Enable()
+	sniffingEnable.Store(dispatcher != nil && dispatcher.Enable())
 	configMux.Unlock()
 }
 
 // Mode return current mode
 func Mode() TunnelMode {
-	return mode
+	return mode.Load()
 }
 
 // SetMode change the mode of tunnel
 func SetMode(m TunnelMode) {
-	mode = m
+	mode.Store(m)
 }
 
 func FindProcessMode() process.FindProcessMode {
@@ -316,9 +339,10 @@ func preHandleMetadata(metadata *C.Metadata) error {
 }
 
 func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err error) {
+	currentProxies := Proxies()
 	if metadata.SpecialProxy != "" {
 		var exist bool
-		proxy, exist = proxies[metadata.SpecialProxy]
+		proxy, exist = currentProxies[metadata.SpecialProxy]
 		if !exist {
 			err = fmt.Errorf("proxy %s not found", metadata.SpecialProxy)
 		}
@@ -378,7 +402,7 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 			}
 		},
 		CheckPassRule: func(adapterName string) bool {
-			adapter, ok := proxies[adapterName]
+			adapter, ok := currentProxies[adapterName]
 			if !ok {
 				return false
 			}
@@ -399,11 +423,11 @@ func resolveMetadata(metadata *C.Metadata) (proxy C.Proxy, rule C.Rule, err erro
 		helper.FindProcess = nil
 	}
 
-	switch mode {
+	switch Mode() {
 	case Direct:
-		proxy = proxies["DIRECT"]
+		proxy = currentProxies["DIRECT"]
 	case Global:
-		proxy = proxies["GLOBAL"]
+		proxy = currentProxies["GLOBAL"]
 	// Rule
 	default:
 		proxy, rule, err = match(metadata, helper)
@@ -427,10 +451,22 @@ func handleUDPConn(packet C.PacketAdapter) {
 	metadata := packet.Metadata()
 	if !metadata.Valid() {
 		packet.Drop()
-		log.Warnln("[Metadata] not valid: %#v", metadata)
+		log.Warnln("[Metadata] not valid: type=%s src=%s dst=%s:%d", metadata.Type.String(), metadata.SourceAddress(), metadata.String(), metadata.DstPort)
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
+
+	key := packet.Key()
+	if sender, exists := natTable.Get(key); exists {
+		if err := preHandleMetadata(metadata.Clone()); err != nil {
+			packet.Drop()
+			log.Debugln("[Metadata PreHandle] error: %s", err)
+			return
+		}
+		sender.Send(packet)
+		return
+	}
+
 	if !xboard.CanOpen(metadata.InName, metadata.InUser, metadata.SrcIP.String()) {
 		packet.Drop()
 		return
@@ -442,11 +478,10 @@ func handleUDPConn(packet C.PacketAdapter) {
 		return
 	}
 
-	key := packet.Key()
 	sender, loaded := natTable.GetOrCreate(key, func() C.PacketSender {
 		sender := newPacketSender()
-		if sniffingEnable && snifferDispatcher.Enable() {
-			return snifferDispatcher.UDPSniff(packet, sender)
+		if dispatcher := currentSniffer(); dispatcher != nil {
+			return dispatcher.UDPSniff(packet, sender)
 		}
 		return sender
 	})
@@ -516,7 +551,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	metadata := connCtx.Metadata()
 	if !metadata.Valid() {
-		log.Warnln("[Metadata] not valid: %#v", metadata)
+		log.Warnln("[Metadata] not valid: type=%s src=%s dst=%s:%d", metadata.Type.String(), metadata.SourceAddress(), metadata.String(), metadata.DstPort)
 		return
 	}
 	fixMetadata(metadata) // fix some metadata not set via metadata.SetRemoteAddr or metadata.SetRemoteAddress
@@ -532,10 +567,10 @@ func handleTCPConn(connCtx C.ConnContext) {
 
 	conn := connCtx.Conn()
 	conn.ResetPeeked() // reset before sniffer
-	if sniffingEnable && snifferDispatcher.Enable() {
+	if dispatcher := currentSniffer(); dispatcher != nil {
 		// Try to sniff a domain when `preHandleMetadata` failed, this is usually
 		// caused by a "Fake DNS record missing" error when enhanced-mode is fake-ip.
-		if snifferDispatcher.TCPSniff(conn, metadata) {
+		if dispatcher.TCPSniff(conn, metadata) {
 			// we now have a domain name
 			preHandleFailed = false
 		}
@@ -641,6 +676,7 @@ func logMetadataErr(metadata *C.Metadata, rule C.Rule, proxy C.ProxyAdapter, err
 }
 
 func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
+	currentMode := Mode()
 	switch {
 	case metadata.SpecialProxy != "":
 		log.Infoln("[%s] %s --> %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), remoteConn.Chains().String())
@@ -650,9 +686,9 @@ func logMetadata(metadata *C.Metadata, rule C.Rule, remoteConn C.Connection) {
 		} else {
 			log.Infoln("[%s] %s --> %s match %s using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), rule.RuleType().String(), remoteConn.Chains().String())
 		}
-	case mode == Global:
+	case currentMode == Global:
 		log.Infoln("[%s] %s --> %s using GLOBAL", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
-	case mode == Direct:
+	case currentMode == Direct:
 		log.Infoln("[%s] %s --> %s using DIRECT", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress())
 	default:
 		log.Infoln("[%s] %s --> %s doesn't match any rule using %s", strings.ToUpper(metadata.NetWork.String()), metadata.SourceDetail(), metadata.RemoteAddress(), remoteConn.Chains().String())

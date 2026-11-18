@@ -1,6 +1,7 @@
 package redir
 
 import (
+	"context"
 	"net"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -31,14 +32,21 @@ func (l *Listener) Close() error {
 }
 
 func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+	return NewWithConfig(addr, inbound.NewListenConfig(), tunnel, additions...)
+}
+
+func NewWithConfig(addr string, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-REDIR"),
 			inbound.WithSpecialRules(""),
 		}
 	}
+	if lc == nil {
+		lc = inbound.NewListenConfig()
+	}
 
-	l, err := net.Listen("tcp", addr)
+	l, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return nil, err
 	}

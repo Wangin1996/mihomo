@@ -90,6 +90,9 @@ func (v *AnyTLS) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *AnyTLS) Close() error {
+	if v.l == nil {
+		return nil
+	}
 	return v.l.Close()
 }
 

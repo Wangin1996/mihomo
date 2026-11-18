@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -36,19 +37,42 @@ import (
 type Listener struct {
 	closed       bool
 	config       LC.Hysteria2Server
+	configMu     sync.RWMutex
 	udpListeners []net.PacketConn
-	services     []*hysteria2.Service[string]
+	services     []*hy2Service[string]
 }
 
-func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
-	var sl *Listener
-	var err error
+func validateMasqueradeHost(host string) error {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return errors.New("empty masquerade host")
+	}
+	lower := strings.TrimSuffix(strings.ToLower(trimmed), ".")
+	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
+		return fmt.Errorf("disallowed masquerade host %q: localhost is forbidden", host)
+	}
+	if addr, err := netip.ParseAddr(trimmed); err == nil {
+		ip := addr.Unmap()
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("disallowed masquerade host %q: loopback, private, link-local, or unspecified IP is forbidden", host)
+		}
+	}
+	return nil
+}
+
+func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-HYSTERIA2"),
 			inbound.WithSpecialRules(""),
 		}
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 
 	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
@@ -60,7 +84,7 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		return nil, err
 	}
 
-	sl = &Listener{false, config, nil, nil}
+	sl = &Listener{config: config}
 
 	tlsConfig := &tls.Config{
 		Time:       ntp.Now,
@@ -123,10 +147,13 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		if err != nil {
 			return nil, E.Cause(err, "parse masquerade URL")
 		}
-		switch masqueradeURL.Scheme {
+		switch strings.ToLower(masqueradeURL.Scheme) {
 		case "file":
-			masqueradeHandler = http.FileServer(http.Dir(masqueradeURL.Path))
+			return nil, errors.New("file scheme is forbidden in hysteria2 masquerade")
 		case "http", "https":
+			if err := validateMasqueradeHost(masqueradeURL.Hostname()); err != nil {
+				return nil, err
+			}
 			masqueradeHandler = &httputil.ReverseProxy{
 				Rewrite: func(r *httputil.ProxyRequest) {
 					r.SetURL(masqueradeURL)
@@ -213,7 +240,7 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 		MaxConnectionReceiveWindow:     config.MaxConnectionReceiveWindow,
 	}
 
-	service, err := hysteria2.NewService[string](hysteria2.ServiceOptions{
+	service, err := newHy2Service[string](serviceOptions{
 		Context:               context.Background(),
 		Logger:                log.SingLogger,
 		SendBPS:               utils.StringToBps(config.Up),
@@ -249,23 +276,24 @@ func New(config LC.Hysteria2Server, lc C.InboundListenConfig, tunnel C.Tunnel, a
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 		_service := *service
-		service := &_service // make a copy
+		addrService := &_service // shares atomic userMap pointer across addresses
 
-		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
+		var ul net.PacketConn
+		ul, err = lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			return nil, err
 		}
 
-		if err := sockopt.UDPReuseaddr(ul); err != nil {
-			log.Warnln("Failed to Reuse UDP Address: %s", err)
+		if reuseErr := sockopt.UDPReuseaddr(ul); reuseErr != nil {
+			log.Warnln("Failed to Reuse UDP Address: %s", reuseErr)
 		}
 
 		sl.udpListeners = append(sl.udpListeners, ul)
-		sl.services = append(sl.services, service)
+		sl.services = append(sl.services, addrService)
 
-		go func() {
-			_ = service.Start(ul)
-		}()
+		if err = addrService.Start(ul); err != nil {
+			return nil, err
+		}
 	}
 
 	return sl, nil
@@ -290,7 +318,26 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() string {
+	l.configMu.RLock()
+	defer l.configMu.RUnlock()
 	return l.config.String()
+}
+
+func (l *Listener) UpdateUsers(users map[string]string) {
+	userNameList := make([]string, 0, len(users))
+	userPasswordList := make([]string, 0, len(users))
+	usersCopy := make(map[string]string, len(users))
+	for name, password := range users {
+		userNameList = append(userNameList, name)
+		userPasswordList = append(userPasswordList, password)
+		usersCopy[name] = password
+	}
+	l.configMu.Lock()
+	if len(l.services) > 0 {
+		l.services[0].UpdateUsers(userNameList, userPasswordList)
+	}
+	l.config.Users = usersCopy
+	l.configMu.Unlock()
 }
 
 func (l *Listener) AddrList() (addrList []net.Addr) {

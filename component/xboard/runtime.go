@@ -32,11 +32,16 @@ type userStats struct {
 	connections int
 }
 
+type speedLimitHolder struct {
+	fn func(string) *rate.Limiter
+}
+
 type scopeState struct {
 	users       map[string]User
-	speedLimit  func(string) *rate.Limiter
+	speedLimit  atomic.Pointer[speedLimitHolder]
 	deviceLimit func(string) (int, bool)
 	limitEvent  func()
+	removed     atomic.Bool
 
 	globalDevices map[int]map[string]bool
 	globalAt      time.Time
@@ -45,11 +50,14 @@ type scopeState struct {
 
 type connectionRef struct {
 	scope    string
+	state    *scopeState
 	user     User
 	alias    string
 	sourceIP string
 	stats    *userStats
 	closer   io.Closer
+	ctx      context.Context
+	cancel   context.CancelFunc
 }
 
 var runtimeState = struct {
@@ -88,14 +96,9 @@ func ConfigureScope(
 		runtimeState.scopes[scope] = state
 	}
 	state.users = usersCopy
-	state.speedLimit = speedLimit
+	state.speedLimit.Store(&speedLimitHolder{fn: speedLimit})
 	state.deviceLimit = deviceLimit
 	state.limitEvent = limitEvent
-	for _, user := range usersCopy {
-		if state.stats[user.ID] == nil {
-			state.stats[user.ID] = &userStats{ips: make(map[string]int)}
-		}
-	}
 
 	var stale []io.Closer
 	for _, ref := range runtimeState.connections {
@@ -104,29 +107,42 @@ func ConfigureScope(
 		}
 		current, ok := usersCopy[ref.alias]
 		if !ok || current.ID != ref.user.ID || current.UUID != ref.user.UUID {
+			if ref.cancel != nil {
+				ref.cancel()
+			}
 			stale = append(stale, ref.closer)
 		}
 	}
 	runtimeState.mu.Unlock()
 
 	for _, closer := range stale {
-		_ = closer.Close()
+		if closer != nil {
+			_ = closer.Close()
+		}
 	}
 }
 
 // RemoveScope removes an inbound and terminates all of its active connections.
 func RemoveScope(scope string) {
 	runtimeState.mu.Lock()
-	delete(runtimeState.scopes, scope)
+	if state := runtimeState.scopes[scope]; state != nil {
+		state.removed.Store(true)
+		delete(runtimeState.scopes, scope)
+	}
 	var connections []io.Closer
 	for _, ref := range runtimeState.connections {
 		if ref.scope == scope {
+			if ref.cancel != nil {
+				ref.cancel()
+			}
 			connections = append(connections, ref.closer)
 		}
 	}
 	runtimeState.mu.Unlock()
 	for _, closer := range connections {
-		_ = closer.Close()
+		if closer != nil {
+			_ = closer.Close()
+		}
 	}
 }
 
@@ -137,33 +153,28 @@ type Connection struct {
 	closed atomic.Bool
 }
 
-// Open reserves the source IP and registers an authenticated connection.
-// Unconfigured scopes are allowed and returned without an accounting handle.
+// CanOpen checks whether a connection can be admitted without mutating state.
 func CanOpen(scope, alias, sourceIP string) bool {
 	if scope == "" {
 		return true
 	}
 
-	runtimeState.mu.Lock()
+	runtimeState.mu.RLock()
 	state := runtimeState.scopes[scope]
 	if state == nil {
-		runtimeState.mu.Unlock()
+		runtimeState.mu.RUnlock()
 		return true
 	}
 	if alias == "" {
-		runtimeState.mu.Unlock()
+		runtimeState.mu.RUnlock()
 		return false
 	}
 	user, ok := state.users[alias]
 	if !ok {
-		runtimeState.mu.Unlock()
+		runtimeState.mu.RUnlock()
 		return false
 	}
 	stats := state.stats[user.ID]
-	if stats == nil {
-		stats = &userStats{ips: make(map[string]int)}
-		state.stats[user.ID] = stats
-	}
 
 	limit := 0
 	if state.deviceLimit != nil {
@@ -173,19 +184,24 @@ func CanOpen(scope, alias, sourceIP string) bool {
 	}
 	if !canAdmitLocked(user.ID, sourceIP, limit, state, stats) {
 		event := state.limitEvent
-		runtimeState.mu.Unlock()
+		runtimeState.mu.RUnlock()
 		if event != nil {
 			event()
 		}
 		return false
 	}
-	runtimeState.mu.Unlock()
+	runtimeState.mu.RUnlock()
 	return true
 }
 
+// Open reserves the source IP and registers an authenticated connection.
+// Unconfigured scopes are allowed and returned without an accounting handle.
 func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, bool) {
 	if scope == "" {
 		return nil, true
+	}
+	if sourceIP == "" {
+		sourceIP = "unknown"
 	}
 
 	runtimeState.mu.Lock()
@@ -205,7 +221,7 @@ func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, boo
 	}
 	stats := state.stats[user.ID]
 	if stats == nil {
-		stats = &userStats{ips: make(map[string]int)}
+		stats = &userStats{}
 		state.stats[user.ID] = stats
 	}
 
@@ -224,9 +240,17 @@ func Open(id, scope, alias, sourceIP string, closer io.Closer) (*Connection, boo
 		return nil, false
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	ref := &connectionRef{
-		scope: scope, user: user, alias: alias, sourceIP: sourceIP,
-		stats: stats, closer: closer,
+		scope:    scope,
+		state:    state,
+		user:     user,
+		alias:    alias,
+		sourceIP: sourceIP,
+		stats:    stats,
+		closer:   closer,
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 	runtimeState.connections[id] = ref
 	runtimeState.mu.Unlock()
@@ -237,9 +261,12 @@ func canAdmitLocked(userID int, sourceIP string, limit int, state *scopeState, s
 	if sourceIP == "" {
 		sourceIP = "unknown"
 	}
-	stats.mu.RLock()
-	activeCount := stats.ips[sourceIP]
-	stats.mu.RUnlock()
+	activeCount := 0
+	if stats != nil {
+		stats.mu.RLock()
+		activeCount = stats.ips[sourceIP]
+		stats.mu.RUnlock()
+	}
 	if limit > 0 && activeCount == 0 {
 		seen := make(map[string]struct{})
 		for _, scope := range runtimeState.scopes {
@@ -271,6 +298,9 @@ func admitLocked(userID int, sourceIP string, limit int, state *scopeState, stat
 		return false
 	}
 	stats.mu.Lock()
+	if stats.ips == nil {
+		stats.ips = make(map[string]int)
+	}
 	stats.connections++
 	stats.ips[sourceIP]++
 	stats.mu.Unlock()
@@ -290,17 +320,22 @@ func (c *Connection) AddDownload(size int64) {
 }
 
 func (c *Connection) limiter() *rate.Limiter {
-	if c == nil {
+	if c == nil || c.ref == nil || c.ref.state == nil || c.ref.state.removed.Load() {
 		return nil
 	}
-	runtimeState.mu.RLock()
-	state := runtimeState.scopes[c.ref.scope]
-	var limiter *rate.Limiter
-	if state != nil && state.speedLimit != nil {
-		limiter = state.speedLimit(c.ref.user.UUID)
+	holder := c.ref.state.speedLimit.Load()
+	if holder == nil || holder.fn == nil {
+		return nil
 	}
-	runtimeState.mu.RUnlock()
-	return limiter
+	return holder.fn(c.ref.user.UUID)
+}
+
+func (c *Connection) IsUnlimited() bool {
+	if c == nil {
+		return true
+	}
+	limiter := c.limiter()
+	return limiter == nil || limiter.Limit() == rate.Inf || limiter.Burst() <= 0
 }
 
 func (c *Connection) ReadLimit() int {
@@ -312,16 +347,19 @@ func (c *Connection) ReadLimit() int {
 }
 
 func (c *Connection) Wait(size int) error {
+	if c == nil || c.ref == nil {
+		return nil
+	}
 	limiter := c.limiter()
 	if limiter == nil || size <= 0 || limiter.Limit() == rate.Inf || limiter.Burst() <= 0 {
 		return nil
 	}
 	for size > 0 {
 		chunk := size
-		if chunk > limiter.Burst() {
-			chunk = limiter.Burst()
+		if burst := limiter.Burst(); chunk > burst {
+			chunk = burst
 		}
-		if err := limiter.WaitN(context.Background(), chunk); err != nil {
+		if err := limiter.WaitN(c.ref.ctx, chunk); err != nil {
 			return err
 		}
 		size -= chunk
@@ -332,6 +370,9 @@ func (c *Connection) Wait(size int) error {
 func (c *Connection) Close() {
 	if c == nil || !c.closed.CompareAndSwap(false, true) {
 		return
+	}
+	if c.ref.cancel != nil {
+		c.ref.cancel()
 	}
 	runtimeState.mu.Lock()
 	if current := runtimeState.connections[c.id]; current == c.ref {
@@ -344,10 +385,12 @@ func (c *Connection) Close() {
 	if stats.connections > 0 {
 		stats.connections--
 	}
-	if count := stats.ips[c.ref.sourceIP]; count > 1 {
-		stats.ips[c.ref.sourceIP] = count - 1
-	} else {
-		delete(stats.ips, c.ref.sourceIP)
+	if stats.ips != nil {
+		if count := stats.ips[c.ref.sourceIP]; count > 1 {
+			stats.ips[c.ref.sourceIP] = count - 1
+		} else {
+			delete(stats.ips, c.ref.sourceIP)
+		}
 	}
 	stats.mu.Unlock()
 }
@@ -381,10 +424,6 @@ func SnapshotScope(scope string) Snapshot {
 		Connections: connections,
 	}
 	for id, stats := range statsCopy {
-		upload, download := stats.upload.Load(), stats.download.Load()
-		if upload > 0 || download > 0 {
-			snapshot.Traffic[id] = [2]int64{upload, download}
-		}
 		stats.mu.RLock()
 		activeConnections := stats.connections
 		if len(stats.ips) > 0 {
@@ -394,11 +433,32 @@ func SnapshotScope(scope string) Snapshot {
 			}
 			snapshot.AliveIPs[id] = ips
 		}
+		upload, download := stats.upload.Load(), stats.download.Load()
 		stats.mu.RUnlock()
+
+		if upload > 0 || download > 0 {
+			snapshot.Traffic[id] = [2]int64{upload, download}
+		}
 		if !activeUsers[id] && activeConnections == 0 {
 			runtimeState.mu.Lock()
 			if current := runtimeState.scopes[scope]; current == state && current.stats[id] == stats {
-				delete(current.stats, id)
+				stillActive := false
+				for _, u := range current.users {
+					if u.ID == id {
+						stillActive = true
+						break
+					}
+				}
+				stats.mu.RLock()
+				stillZero := stats.connections == 0
+				finalUp, finalDown := stats.upload.Load(), stats.download.Load()
+				stats.mu.RUnlock()
+				if !stillActive && stillZero {
+					if finalUp > 0 || finalDown > 0 {
+						snapshot.Traffic[id] = [2]int64{finalUp, finalDown}
+					}
+					delete(current.stats, id)
+				}
 			}
 			runtimeState.mu.Unlock()
 		}
@@ -413,23 +473,33 @@ func CloseConnection(id string) bool {
 	if ref == nil {
 		return false
 	}
-	_ = ref.closer.Close()
+	if ref.cancel != nil {
+		ref.cancel()
+	}
+	if ref.closer != nil {
+		_ = ref.closer.Close()
+	}
 	return true
 }
 
 func CloseUser(scope, uuid string) int {
 	runtimeState.mu.RLock()
-	var connections []io.Closer
+	var refs []*connectionRef
 	for _, ref := range runtimeState.connections {
 		if ref.scope == scope && ref.user.UUID == uuid {
-			connections = append(connections, ref.closer)
+			refs = append(refs, ref)
 		}
 	}
 	runtimeState.mu.RUnlock()
-	for _, closer := range connections {
-		_ = closer.Close()
+	for _, ref := range refs {
+		if ref.cancel != nil {
+			ref.cancel()
+		}
+		if ref.closer != nil {
+			_ = ref.closer.Close()
+		}
 	}
-	return len(connections)
+	return len(refs)
 }
 
 func UpdateGlobalDevices(scope string, users map[int][]string) {

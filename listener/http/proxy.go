@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
@@ -16,6 +18,26 @@ import (
 
 	"github.com/metacubex/http"
 )
+
+const defaultHandshakeTimeout = 15 * time.Second
+
+var handshakeTimeoutNs atomic.Int64
+
+func init() {
+	handshakeTimeoutNs.Store(int64(defaultHandshakeTimeout))
+}
+
+func handshakeTimeout() time.Duration {
+	return time.Duration(handshakeTimeoutNs.Load())
+}
+
+// SetHandshakeTimeout overrides the HTTP header read timeout and returns a restore function.
+func SetHandshakeTimeout(d time.Duration) func() {
+	prev := handshakeTimeoutNs.Swap(int64(d))
+	return func() {
+		handshakeTimeoutNs.Store(prev)
+	}
+}
 
 type bodyWrapper struct {
 	io.ReadCloser
@@ -42,91 +64,104 @@ func HandleConn(c net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...
 
 	conn := N.NewBufferedConn(c)
 
-	authenticator := store.Authenticator()
-	trusted := authenticator == nil // disable authenticate if lru is nil
 	lastUser := ""
 
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout()))
 		peekMutex.Lock()
+		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout()))
 		request, err := ReadRequest(conn.Reader())
 		peekMutex.Unlock()
 		if err != nil {
 			break
 		}
+		_ = conn.SetReadDeadline(time.Time{})
 
 		request.RemoteAddr = conn.RemoteAddr().String()
 
 		keepAlive := strings.TrimSpace(strings.ToLower(request.Header.Get("Proxy-Connection"))) == "keep-alive"
 
-		resp, user := authenticate(request, authenticator) // always call authenticate function to get user
-		if resp == nil {
-			trusted = true
+		var authenticator auth.Authenticator
+		if store != nil {
+			authenticator = store.Authenticator()
 		}
+
+		var resp *http.Response
+		var user string
+		if authenticator != nil {
+			resp, user = authenticate(request, authenticator)
+			if resp != nil {
+				resp.Close = true
+				resp.Header.Set("Proxy-Connection", "close")
+				resp.Header.Set("Connection", "close")
+				_ = resp.Write(conn)
+				break
+			}
+		}
+
 		additions[inUserIdx] = inbound.WithInUser(user)
 
-		if trusted {
-			if request.Method == http.MethodConnect {
-				// Manual writing to support CONNECT for http 1.0 (workaround for uplay client)
-				if _, err = fmt.Fprintf(conn, "HTTP/%d.%d %03d %s\r\n\r\n", request.ProtoMajor, request.ProtoMinor, http.StatusOK, "Connection established"); err != nil {
-					break // close connection
-				}
-
-				tunnel.HandleTCPConn(inbound.NewHTTPS(request, conn, additions...))
-
-				return // hijack connection
+		if request.Method == http.MethodConnect {
+			// Manual writing to support CONNECT for http 1.0 (workaround for uplay client)
+			if _, err = fmt.Fprintf(conn, "HTTP/%d.%d %03d %s\r\n\r\n", request.ProtoMajor, request.ProtoMinor, http.StatusOK, "Connection established"); err != nil {
+				break // close connection
 			}
 
-			host := request.Header.Get("Host")
-			if host != "" {
-				request.Host = host
-			}
+			tunnel.HandleTCPConn(inbound.NewHTTPS(request, conn, additions...))
 
-			request.RequestURI = ""
-
-			if isUpgradeRequest(request) {
-				handleUpgrade(conn, request, tunnel, additions...)
-
-				return // hijack connection
-			}
-
-			// ensure there is a client with correct additions
-			// when the authenticated user changed, outbound client should close idle connections
-			if user != lastUser {
-				client.CloseIdleConnections()
-				lastUser = user
-			}
-
-			removeHopByHopHeaders(request.Header)
-			removeExtraHTTPHostPort(request)
-
-			if request.URL.Scheme == "" || request.URL.Host == "" {
-				resp = responseWith(request, http.StatusBadRequest)
-			} else {
-				request = request.WithContext(ctx)
-
-				startBackgroundRead := func() {
-					go func() {
-						peekMutex.Lock()
-						defer peekMutex.Unlock()
-						_, err := conn.Peek(1)
-						if err != nil {
-							cancel()
-						}
-					}()
-				}
-				if request.Body == nil || request.Body == http.NoBody {
-					startBackgroundRead()
-				} else {
-					request.Body = &bodyWrapper{ReadCloser: request.Body, onHitEOF: startBackgroundRead}
-				}
-				resp, err = client.Do(request)
-				if err != nil {
-					resp = responseWith(request, http.StatusBadGateway)
-				}
-			}
-
-			removeHopByHopHeaders(resp.Header)
+			return // hijack connection
 		}
+
+		host := request.Header.Get("Host")
+		if host != "" {
+			request.Host = host
+		}
+
+		request.RequestURI = ""
+
+		if isUpgradeRequest(request) {
+			handleUpgrade(conn, request, tunnel, additions...)
+
+			return // hijack connection
+		}
+
+		// ensure there is a client with correct additions
+		// when the authenticated user changed, outbound client should close idle connections
+		if user != lastUser {
+			client.CloseIdleConnections()
+			lastUser = user
+		}
+
+		removeHopByHopHeaders(request.Header)
+		removeExtraHTTPHostPort(request)
+
+		if request.URL.Scheme == "" || request.URL.Host == "" {
+			resp = responseWith(request, http.StatusBadRequest)
+		} else {
+			request = request.WithContext(ctx)
+
+			startBackgroundRead := func() {
+				go func() {
+					peekMutex.Lock()
+					defer peekMutex.Unlock()
+					_, err := conn.Peek(1)
+					if err != nil {
+						cancel()
+					}
+				}()
+			}
+			if request.Body == nil || request.Body == http.NoBody {
+				startBackgroundRead()
+			} else {
+				request.Body = &bodyWrapper{ReadCloser: request.Body, onHitEOF: startBackgroundRead}
+			}
+			resp, err = client.Do(request)
+			if err != nil {
+				resp = responseWith(request, http.StatusBadGateway)
+			}
+		}
+
+		removeHopByHopHeaders(resp.Header)
 
 		if !keepAlive {
 			resp.Close = true // close connection if keep-alive is not set

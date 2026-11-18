@@ -92,6 +92,9 @@ func (v *TrustTunnel) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *TrustTunnel) Close() error {
+	if v.l == nil {
+		return nil
+	}
 	return v.l.Close()
 }
 

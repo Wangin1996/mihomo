@@ -158,7 +158,43 @@ func (t *Hysteria2) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (t *Hysteria2) Close() error {
+	if t.l == nil {
+		return nil
+	}
 	return t.l.Close()
 }
 
+func (t *Hysteria2) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*Hysteria2Option)
+	if !ok || !sameHysteria2Static(t.config, next) {
+		return false, nil
+	}
+	listener := t.l
+	if listener == nil {
+		return false, nil
+	}
+	users := cloneHysteria2Users(next.Users)
+	listener.UpdateUsers(users)
+	t.config.Users = users
+	t.ts.Users = cloneHysteria2Users(users)
+	return true, nil
+}
+
+func sameHysteria2Static(left, right *Hysteria2Option) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
+func cloneHysteria2Users(users map[string]string) map[string]string {
+	copyUsers := make(map[string]string, len(users))
+	for user, password := range users {
+		copyUsers[user] = password
+	}
+	return copyUsers
+}
+
 var _ C.InboundListener = (*Hysteria2)(nil)
+var _ C.InboundUserUpdater = (*Hysteria2)(nil)

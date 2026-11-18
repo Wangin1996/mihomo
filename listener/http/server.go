@@ -27,6 +27,28 @@ type Listener struct {
 	store    auth.AuthStore
 }
 
+type listenerAuthStore struct {
+	l *Listener
+}
+
+func (s listenerAuthStore) Authenticator() auth.Authenticator {
+	s.l.authMu.RLock()
+	store := s.l.store
+	s.l.authMu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	return store.Authenticator()
+}
+
+func (s listenerAuthStore) SetAuthenticator(authenticator auth.Authenticator) {
+	s.l.authMu.Lock()
+	if s.l.store != nil {
+		s.l.store.SetAuthenticator(authenticator)
+	}
+	s.l.authMu.Unlock()
+}
+
 // RawAddress implements C.Listener
 func (l *Listener) RawAddress() string {
 	return l.addr
@@ -57,7 +79,7 @@ func NewWithAuthenticate(addr string, tunnel C.Tunnel, authenticate bool, additi
 	return NewWithConfig(LC.AuthServer{Enable: true, Listen: addr, AuthStore: store}, inbound.NewListenConfig(), tunnel, additions...)
 }
 
-func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (hl *Listener, err error) {
 	isDefault := false
 	if len(additions) == 0 {
 		isDefault = true
@@ -71,6 +93,11 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil && l != nil {
+			_ = l.Close()
+		}
+	}()
 
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var realityBuilder *reality.Builder
@@ -123,7 +150,7 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 		l = tls.NewListener(l, tlsConfig)
 	}
 
-	hl := &Listener{
+	hl = &Listener{
 		listener: l,
 		addr:     config.Listen,
 		store:    config.AuthStore,
@@ -131,8 +158,8 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 
 	go func() {
 		for {
-			conn, err := hl.listener.Accept()
-			if err != nil {
+			conn, acceptErr := hl.listener.Accept()
+			if acceptErr != nil {
 				if hl.closed {
 					break
 				}
@@ -140,18 +167,19 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 			}
 
 			hl.authMu.RLock()
-			store := hl.store
+			currentStore := hl.store
 			hl.authMu.RUnlock()
-			if isDefault || store == authStore.Default { // only apply on default listener
+			var connStore auth.AuthStore = listenerAuthStore{l: hl}
+			if isDefault || currentStore == authStore.Default { // only apply on default listener
 				if !inbound.IsRemoteAddrDisAllowed(conn.RemoteAddr()) {
 					_ = conn.Close()
 					continue
 				}
 				if inbound.SkipAuthRemoteAddr(conn.RemoteAddr()) {
-					store = authStore.Nil
+					connStore = authStore.Nil
 				}
 			}
-			go HandleConn(conn, tunnel, store, additions...)
+			go HandleConn(conn, tunnel, connStore, additions...)
 		}
 	}()
 

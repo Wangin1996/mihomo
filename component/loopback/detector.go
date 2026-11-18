@@ -24,16 +24,19 @@ func init() {
 
 var ErrReject = errors.New("reject loopback connection")
 
-type Detector struct {
-	connMap       xsync.Map[netip.AddrPort, struct{}]
-	packetConnMap xsync.Map[uint16, struct{}]
-}
+var (
+	globalConnMap       xsync.Map[netip.AddrPort, struct{}]
+	globalPacketConnMap xsync.Map[uint16, struct{}]
+	sharedDetector      = &Detector{}
+)
+
+type Detector struct{}
 
 func NewDetector() *Detector {
 	if disableLoopBackDetector {
 		return nil
 	}
-	return &Detector{}
+	return sharedDetector
 }
 
 func (l *Detector) NewConn(conn C.Conn) C.Conn {
@@ -48,9 +51,9 @@ func (l *Detector) NewConn(conn C.Conn) C.Conn {
 	if !connAddr.IsValid() {
 		return conn
 	}
-	l.connMap.Store(connAddr, struct{}{})
+	globalConnMap.Store(connAddr, struct{}{})
 	return callback.NewCloseCallbackConn(conn, func() {
-		l.connMap.Delete(connAddr)
+		globalConnMap.Delete(connAddr)
 	})
 }
 
@@ -67,9 +70,9 @@ func (l *Detector) NewPacketConn(conn C.PacketConn) C.PacketConn {
 		return conn
 	}
 	port := connAddr.Port()
-	l.packetConnMap.Store(port, struct{}{})
+	globalPacketConnMap.Store(port, struct{}{})
 	return callback.NewCloseCallbackPacketConn(conn, func() {
-		l.packetConnMap.Delete(port)
+		globalPacketConnMap.Delete(port)
 	})
 }
 
@@ -81,7 +84,7 @@ func (l *Detector) CheckConn(metadata *C.Metadata) error {
 	if !connAddr.IsValid() {
 		return nil
 	}
-	if _, ok := l.connMap.Load(connAddr); ok {
+	if _, ok := globalConnMap.Load(connAddr); ok {
 		return fmt.Errorf("%w to: %s", ErrReject, metadata.RemoteAddress())
 	}
 	return nil
@@ -104,7 +107,7 @@ func (l *Detector) CheckPacketConn(metadata *C.Metadata) error {
 		return nil
 	}
 
-	if _, ok := l.packetConnMap.Load(connAddr.Port()); ok {
+	if _, ok := globalPacketConnMap.Load(connAddr.Port()); ok {
 		return fmt.Errorf("%w to: %s", ErrReject, metadata.RemoteAddress())
 	}
 	return nil

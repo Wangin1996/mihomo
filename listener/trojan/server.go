@@ -33,10 +33,13 @@ import (
 	"github.com/metacubex/tls"
 )
 
+const handshakeTimeout = 15 * time.Second
+
 type Listener struct {
 	closed     bool
 	config     LC.TrojanServer
 	listeners  []net.Listener
+	httpServer *http.Server
 	keys       map[[trojan.KeyLength]byte]string
 	keysMu     sync.RWMutex
 	pickCipher core.Cipher
@@ -50,6 +53,12 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			inbound.WithSpecialRules(""),
 		}
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.TROJAN,
@@ -85,9 +94,10 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		handler:    h,
 	}
 
-	httpServer := http.Server{
-		IdleTimeout: 30 * time.Second,
-		Protocols:   new(http.Protocols),
+	httpServer := &http.Server{
+		ReadHeaderTimeout: handshakeTimeout,
+		IdleTimeout:       30 * time.Second,
+		Protocols:         new(http.Protocols),
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var shadowTLSBuilder *shadowtls.Builder
@@ -201,11 +211,16 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		tlsConfig.NextProtos = append([]string{"h2"}, tlsConfig.NextProtos...) // h2 must before http/1.1
 	}
 
+	if httpServer.Handler != nil {
+		sl.httpServer = httpServer
+	}
+
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
 		//TCP
-		l, err := lc.Listen(context.Background(), "tcp", addr)
+		var l net.Listener
+		l, err = lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
 		}
@@ -220,6 +235,7 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else if !config.TrojanSSOption.Enabled && !config.AllowInsecure {
+			_ = l.Close()
 			return nil, errors.New("disallow using Trojan without any certificates/shadow-tls/res-tls/jls/reality/ss/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
@@ -230,8 +246,8 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 				return
 			}
 			for {
-				c, err := l.Accept()
-				if err != nil {
+				c, acceptErr := l.Accept()
+				if acceptErr != nil {
 					if sl.closed {
 						break
 					}
@@ -249,6 +265,11 @@ func New(config LC.TrojanServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 func (l *Listener) Close() error {
 	l.closed = true
 	var retErr error
+	if l.httpServer != nil {
+		if err := l.httpServer.Close(); err != nil {
+			retErr = err
+		}
+	}
 	for _, lis := range l.listeners {
 		err := lis.Close()
 		if err != nil {
@@ -259,6 +280,8 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() string {
+	l.keysMu.RLock()
+	defer l.keysMu.RUnlock()
 	return l.config.String()
 }
 
@@ -282,6 +305,8 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 
 func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 
 	if l.pickCipher != nil {
 		conn = l.pickCipher.StreamConn(conn)
@@ -315,6 +340,7 @@ func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 func (l *Listener) handleConn(inMux bool, conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	if inMux {
 		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	}
 
 	command, err := socks5.ReadByte(conn)
@@ -343,6 +369,8 @@ func (l *Listener) handleConn(inMux bool, conn net.Conn, tunnel C.Tunnel, additi
 			return
 		}
 	}
+
+	_ = conn.SetReadDeadline(time.Time{})
 
 	switch command {
 	case trojan.CommandTCP:

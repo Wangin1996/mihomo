@@ -26,7 +26,11 @@ func NewBase(options *BaseOption) (*Base, error) {
 	}
 	rawListen := strings.TrimSpace(options.Listen)
 	if strings.EqualFold(rawListen, "all") || rawListen == "0.0.0.0,::" {
-		rawListen = "::"
+		if inbound.SupportsIPv6() {
+			rawListen = "::"
+		} else {
+			rawListen = "0.0.0.0"
+		}
 	}
 	addr, err := netip.ParseAddr(rawListen)
 	if err != nil {
@@ -131,7 +135,11 @@ func (o BaseOption) ListenConfig() C.InboundListenConfig {
 	lc.SetRouteMark(o.RoutingMark)
 	rawListen := strings.TrimSpace(o.Listen)
 	if strings.EqualFold(rawListen, "all") || rawListen == "0.0.0.0,::" {
-		lc.SetListenMode("all")
+		if inbound.SupportsIPv6() {
+			lc.SetListenMode("all")
+		} else {
+			lc.SetListenMode("ipv4")
+		}
 	} else if addr, err := netip.ParseAddr(rawListen); err == nil {
 		if addr.Is4() {
 			lc.SetListenMode("ipv4")

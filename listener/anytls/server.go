@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/common/buf"
@@ -30,6 +31,8 @@ import (
 	"github.com/metacubex/tls"
 )
 
+const handshakeTimeout = 15 * time.Second
+
 type Listener struct {
 	closed    bool
 	config    LC.AnyTLSServer
@@ -47,6 +50,12 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 			inbound.WithSpecialRules(""),
 		}
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 
 	var shadowTLSBuilder *shadowtls.Builder
 	var restlsBuilder *restls.Builder
@@ -148,7 +157,8 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		addr := addr
 
 		//TCP
-		l, err := lc.Listen(context.Background(), "tcp", addr)
+		var l net.Listener
+		l, err = lc.Listen(context.Background(), "tcp", addr)
 		if err != nil {
 			return nil, err
 		}
@@ -161,14 +171,15 @@ func New(config LC.AnyTLSServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		} else if tlsConfig.GetCertificate != nil {
 			l = tls.NewListener(l, tlsConfig)
 		} else if !config.AllowInsecure {
+			_ = l.Close()
 			return nil, errors.New("disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config")
 		}
 		sl.listeners = append(sl.listeners, l)
 
 		go func() {
 			for {
-				c, err := l.Accept()
-				if err != nil {
+				c, acceptErr := l.Accept()
+				if acceptErr != nil {
 					if sl.closed {
 						break
 					}
@@ -195,6 +206,8 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Config() string {
+	l.userMu.RLock()
+	defer l.userMu.RUnlock()
 	return l.config.String()
 }
 
@@ -227,6 +240,8 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 func (l *Listener) HandleConn(conn net.Conn, h *sing.ListenerHandler) {
 	ctx := context.TODO()
 	defer conn.Close()
+
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 
 	b := buf.NewPacket()
 	defer b.Release()
@@ -263,13 +278,17 @@ func (l *Listener) HandleConn(conn net.Conn, h *sing.ListenerHandler) {
 		}
 	}
 
+	_ = conn.SetReadDeadline(time.Time{})
+
 	session := session.NewServerSession(conn, func(stream *session.Stream) {
 		defer stream.Close()
 
+		_ = stream.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		destination, err := M.SocksaddrSerializer.ReadAddrPort(stream)
 		if err != nil {
 			return
 		}
+		_ = stream.SetReadDeadline(time.Time{})
 
 		// It seems that mihomo does not implement a connection error reporting mechanism, so we report success directly.
 		err = stream.HandshakeSuccess()

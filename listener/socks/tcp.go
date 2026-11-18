@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
@@ -23,12 +24,36 @@ import (
 	"github.com/metacubex/tls"
 )
 
+const handshakeTimeout = 15 * time.Second
+
 type Listener struct {
 	listener net.Listener
 	addr     string
 	closed   bool
 	authMu   sync.RWMutex
 	store    auth.AuthStore
+}
+
+type listenerAuthStore struct {
+	l *Listener
+}
+
+func (s listenerAuthStore) Authenticator() auth.Authenticator {
+	s.l.authMu.RLock()
+	store := s.l.store
+	s.l.authMu.RUnlock()
+	if store == nil {
+		return nil
+	}
+	return store.Authenticator()
+}
+
+func (s listenerAuthStore) SetAuthenticator(authenticator auth.Authenticator) {
+	s.l.authMu.Lock()
+	if s.l.store != nil {
+		s.l.store.SetAuthenticator(authenticator)
+	}
+	s.l.authMu.Unlock()
 }
 
 // RawAddress implements C.Listener
@@ -55,7 +80,7 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	return NewWithConfig(defaultConfig(addr), inbound.NewListenConfig(), tunnel, additions...)
 }
 
-func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (sl *Listener, err error) {
 	isDefault := false
 	if len(additions) == 0 {
 		isDefault = true
@@ -69,6 +94,11 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil && l != nil {
+			_ = l.Close()
+		}
+	}()
 
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var realityBuilder *reality.Builder
@@ -121,33 +151,34 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 		l = tls.NewListener(l, tlsConfig)
 	}
 
-	sl := &Listener{
+	sl = &Listener{
 		listener: l,
 		addr:     config.Listen,
 		store:    config.AuthStore,
 	}
 	go func() {
 		for {
-			c, err := l.Accept()
-			if err != nil {
+			c, acceptErr := l.Accept()
+			if acceptErr != nil {
 				if sl.closed {
 					break
 				}
 				continue
 			}
 			sl.authMu.RLock()
-			store := sl.store
+			currentStore := sl.store
 			sl.authMu.RUnlock()
-			if isDefault || store == authStore.Default { // only apply on default listener
+			var connStore auth.AuthStore = listenerAuthStore{l: sl}
+			if isDefault || currentStore == authStore.Default { // only apply on default listener
 				if !inbound.IsRemoteAddrDisAllowed(c.RemoteAddr()) {
 					_ = c.Close()
 					continue
 				}
 				if inbound.SkipAuthRemoteAddr(c.RemoteAddr()) {
-					store = authStore.Nil
+					connStore = authStore.Nil
 				}
 			}
-			go handleSocks(c, tunnel, store, additions...)
+			go handleSocks(c, tunnel, connStore, additions...)
 		}
 	}()
 
@@ -161,6 +192,7 @@ func (l *Listener) UpdateAuthStore(store auth.AuthStore) {
 }
 
 func handleSocks(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	bufConn := N.NewBufferedConn(conn)
 	head, err := bufConn.Peek(1)
 	if err != nil {
@@ -179,23 +211,33 @@ func handleSocks(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions
 }
 
 func HandleSocks4(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
-	authenticator := store.Authenticator()
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	var authenticator auth.Authenticator
+	if store != nil {
+		authenticator = store.Authenticator()
+	}
 	addr, _, user, err := socks4.ServerHandshake(conn, authenticator)
 	if err != nil {
 		conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	additions = append(additions, inbound.WithInUser(user))
 	tunnel.HandleTCPConn(inbound.NewSocket(socks5.ParseAddr(addr), conn, C.SOCKS4, additions...))
 }
 
 func HandleSocks5(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
-	authenticator := store.Authenticator()
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
+	var authenticator auth.Authenticator
+	if store != nil {
+		authenticator = store.Authenticator()
+	}
 	target, command, user, err := socks5.ServerHandshake(conn, authenticator)
 	if err != nil {
 		conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	if command == socks5.CmdUDPAssociate {
 		defer conn.Close()
 		io.Copy(io.Discard, conn)

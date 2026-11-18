@@ -164,6 +164,9 @@ func (v *Vless) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (v *Vless) Close() error {
+	if v.l == nil {
+		return nil
+	}
 	return v.l.Close()
 }
 

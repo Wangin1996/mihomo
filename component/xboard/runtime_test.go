@@ -1,8 +1,12 @@
 package xboard
 
 import (
+	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type testCloser struct{ closed atomic.Int64 }
@@ -99,5 +103,112 @@ func TestManagedScopeRejectsEmptyAndUnknownAlias(t *testing.T) {
 	}
 	if CanOpen(scope, "unknown", "1.1.1.1") {
 		t.Fatal("managed scope must reject unknown alias in CanOpen")
+	}
+}
+
+func TestConfigureScopeLazyStatsAndIsUnlimited(t *testing.T) {
+	const scope = "node-test-lazy"
+	defer RemoveScope(scope)
+
+	users := make(map[string]User, 100)
+	for i := 1; i <= 100; i++ {
+		alias := fmt.Sprintf("u-%d", i)
+		users[alias] = User{ID: i, UUID: alias}
+	}
+	ConfigureScope(scope, users, func(uuid string) *rate.Limiter {
+		if uuid == "u-1" {
+			return rate.NewLimiter(rate.Inf, 0)
+		}
+		if uuid == "u-2" {
+			return rate.NewLimiter(1024, 1024)
+		}
+		return nil
+	}, nil, nil)
+
+	runtimeState.mu.RLock()
+	statsCount := len(runtimeState.scopes[scope].stats)
+	runtimeState.mu.RUnlock()
+	if statsCount != 0 {
+		t.Fatalf("expected lazy stats allocation (0 idle entries), got %d", statsCount)
+	}
+
+	c1, ok := Open("lazy-1", scope, "u-1", "1.2.3.4", &testCloser{})
+	if !ok || !c1.IsUnlimited() {
+		t.Fatal("rate.Inf user should be treated as unlimited")
+	}
+	defer c1.Close()
+
+	c2, ok := Open("lazy-2", scope, "u-2", "1.2.3.5", &testCloser{})
+	if !ok || c2.IsUnlimited() {
+		t.Fatal("finite rate user should not be unlimited")
+	}
+	defer c2.Close()
+
+	c3, ok := Open("lazy-3", scope, "u-3", "1.2.3.6", &testCloser{})
+	if !ok || !c3.IsUnlimited() {
+		t.Fatal("nil limiter user should be unlimited")
+	}
+	defer c3.Close()
+}
+
+func TestWaitCancelsImmediatelyOnCloseOrKick(t *testing.T) {
+	const scope = "node-test-wait-cancel"
+	defer RemoveScope(scope)
+
+	lim := rate.NewLimiter(10, 100)
+	// Drain initial burst
+	_ = lim.AllowN(time.Now(), 100)
+
+	ConfigureScope(scope, map[string]User{"slow": {ID: 42, UUID: "slow"}},
+		func(string) *rate.Limiter { return lim }, nil, nil)
+
+	conn, ok := Open("wait-1", scope, "slow", "5.5.5.5", &testCloser{})
+	if !ok || conn == nil {
+		t.Fatal("expected Open to succeed")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		// 100 bytes at 10 B/s would block ~10s without cancellation
+		done <- conn.Wait(100)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	ConfigureScope(scope, map[string]User{}, nil, nil, nil)
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected Wait to return cancellation error when kicked")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Wait blocked after user kick")
+	}
+	conn.Close()
+}
+
+func TestSnapshotScopePreservesRetiredUserTailTraffic(t *testing.T) {
+	const scope = "node-test-tail-traffic"
+	defer RemoveScope(scope)
+
+	ConfigureScope(scope, map[string]User{"u1": {ID: 99, UUID: "u1"}}, nil, nil, nil)
+	conn, ok := Open("tail-1", scope, "u1", "8.8.8.8", &testCloser{})
+	if !ok || conn == nil {
+		t.Fatal("expected Open to succeed")
+	}
+
+	// Retire user while connection is still finishing tail bytes
+	ConfigureScope(scope, map[string]User{}, nil, nil, nil)
+	conn.AddUpload(4096)
+	conn.AddDownload(8192)
+	conn.Close()
+
+	snap := SnapshotScope(scope)
+	if got := snap.Traffic[99]; got != [2]int64{4096, 8192} {
+		t.Fatalf("retired user tail traffic = %v, want [4096 8192]", got)
+	}
+	snap2 := SnapshotScope(scope)
+	if _, exists := snap2.Traffic[99]; exists {
+		t.Fatal("retired user stats should be cleaned up after final snapshot")
 	}
 }

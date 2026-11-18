@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
@@ -22,6 +24,26 @@ import (
 
 	"github.com/metacubex/tls"
 )
+
+const defaultHandshakeTimeout = 15 * time.Second
+
+var handshakeTimeoutNs atomic.Int64
+
+func init() {
+	handshakeTimeoutNs.Store(int64(defaultHandshakeTimeout))
+}
+
+func handshakeTimeout() time.Duration {
+	return time.Duration(handshakeTimeoutNs.Load())
+}
+
+// SetHandshakeTimeout overrides the initial protocol peek timeout and returns a restore function.
+func SetHandshakeTimeout(d time.Duration) func() {
+	prev := handshakeTimeoutNs.Swap(int64(d))
+	return func() {
+		handshakeTimeoutNs.Store(prev)
+	}
+}
 
 type Listener struct {
 	listener net.Listener
@@ -49,7 +71,7 @@ func New(addr string, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener
 	return NewWithConfig(LC.AuthServer{Enable: true, Listen: addr, AuthStore: authStore.Default}, inbound.NewListenConfig(), tunnel, additions...)
 }
 
-func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (ml *Listener, err error) {
 	isDefault := false
 	if len(additions) == 0 {
 		isDefault = true
@@ -63,6 +85,11 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err != nil && l != nil {
+			_ = l.Close()
+		}
+	}()
 
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var realityBuilder *reality.Builder
@@ -115,7 +142,7 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 		l = tls.NewListener(l, tlsConfig)
 	}
 
-	ml := &Listener{
+	ml = &Listener{
 		listener: l,
 		addr:     config.Listen,
 	}
@@ -146,6 +173,7 @@ func NewWithConfig(config LC.AuthServer, lc C.InboundListenConfig, tunnel C.Tunn
 }
 
 func handleConn(conn net.Conn, tunnel C.Tunnel, store auth.AuthStore, additions ...inbound.Addition) {
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout()))
 	bufConn := N.NewBufferedConn(conn)
 	head, err := bufConn.Peek(1)
 	if err != nil {

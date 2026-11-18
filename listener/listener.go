@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/atomic"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
 	"github.com/metacubex/mihomo/listener/http"
@@ -27,7 +28,8 @@ import (
 )
 
 var (
-	allowLan    = false
+	allowLan    = atomic.NewBool(false)
+	bindAddrMu  sync.RWMutex
 	bindAddress = "*"
 
 	socksListener       *socks.Listener
@@ -90,19 +92,23 @@ func GetTuicConf() LC.TuicServer {
 }
 
 func AllowLan() bool {
-	return allowLan
+	return allowLan.Load()
 }
 
 func BindAddress() string {
+	bindAddrMu.RLock()
+	defer bindAddrMu.RUnlock()
 	return bindAddress
 }
 
 func SetAllowLan(al bool) {
-	allowLan = al
+	allowLan.Store(al)
 }
 
 func SetBindAddress(host string) {
+	bindAddrMu.Lock()
 	bindAddress = host
+	bindAddrMu.Unlock()
 }
 
 func ReCreateHTTP(port int, tunnel C.Tunnel) {
@@ -116,7 +122,7 @@ func ReCreateHTTP(port int, tunnel C.Tunnel) {
 		}
 	}()
 
-	addr := genAddr(bindAddress, port, allowLan)
+	addr := genAddr(BindAddress(), port, AllowLan())
 
 	if httpListener != nil {
 		if httpListener.RawAddress() == addr {
@@ -150,7 +156,7 @@ func ReCreateSocks(port int, tunnel C.Tunnel) {
 		}
 	}()
 
-	addr := genAddr(bindAddress, port, allowLan)
+	addr := genAddr(BindAddress(), port, AllowLan())
 
 	shouldTCPIgnore := false
 	shouldUDPIgnore := false
@@ -209,7 +215,7 @@ func ReCreateRedir(port int, tunnel C.Tunnel) {
 		}
 	}()
 
-	addr := genAddr(bindAddress, port, allowLan)
+	addr := genAddr(BindAddress(), port, AllowLan())
 
 	if redirListener != nil {
 		if redirListener.RawAddress() == addr {
@@ -406,7 +412,7 @@ func ReCreateTProxy(port int, tunnel C.Tunnel) {
 		}
 	}()
 
-	addr := genAddr(bindAddress, port, allowLan)
+	addr := genAddr(BindAddress(), port, AllowLan())
 
 	if tproxyListener != nil {
 		if tproxyListener.RawAddress() == addr {
@@ -452,7 +458,7 @@ func ReCreateMixed(port int, tunnel C.Tunnel) {
 		}
 	}()
 
-	addr := genAddr(bindAddress, port, allowLan)
+	addr := genAddr(BindAddress(), port, AllowLan())
 
 	shouldTCPIgnore := false
 	shouldUDPIgnore := false
@@ -648,6 +654,7 @@ func PatchInboundListeners(newListenerMap map[string]C.InboundListener, tunnel C
 			}
 		}
 		if err := newListener.Listen(tunnel); err != nil {
+			_ = newListener.Close()
 			log.Errorln("Listener %s listen err: %s", name, err.Error())
 			lastInboundErrors = append(lastInboundErrors, fmt.Errorf("listener %s: %w", name, err))
 			continue

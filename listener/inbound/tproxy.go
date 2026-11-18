@@ -56,14 +56,15 @@ func (t *TProxy) Address() string {
 
 // Listen implements constant.InboundListener
 func (t *TProxy) Listen(tunnel C.Tunnel) error {
+	lc := t.ListenConfig()
 	for _, addr := range strings.Split(t.RawAddress(), ",") {
-		lTCP, err := tproxy.New(addr, tunnel, t.Additions()...)
+		lTCP, err := tproxy.NewWithConfig(addr, lc, tunnel, t.Additions()...)
 		if err != nil {
 			return err
 		}
 		t.lTCP = append(t.lTCP, lTCP)
 		if t.udp {
-			lUDP, err := tproxy.NewUDP(addr, tunnel, t.Additions()...)
+			lUDP, err := tproxy.NewUDPWithConfig(addr, lc, tunnel, t.Additions()...)
 			if err != nil {
 				return err
 			}

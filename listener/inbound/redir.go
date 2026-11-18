@@ -51,8 +51,9 @@ func (r *Redir) Address() string {
 
 // Listen implements constant.InboundListener
 func (r *Redir) Listen(tunnel C.Tunnel) error {
+	lc := r.ListenConfig()
 	for _, addr := range strings.Split(r.RawAddress(), ",") {
-		l, err := redir.New(addr, tunnel, r.Additions()...)
+		l, err := redir.NewWithConfig(addr, lc, tunnel, r.Additions()...)
 		if err != nil {
 			return err
 		}

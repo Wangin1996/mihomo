@@ -18,6 +18,14 @@ type entry struct {
 	LocalLockMap    xsync.Map[string, *sync.Cond]
 }
 
+func (t *Table) Get(key string) (C.PacketSender, bool) {
+	item, exist := t.getEntry(key)
+	if !exist {
+		return nil, false
+	}
+	return item.PacketSender, true
+}
+
 func (t *Table) GetOrCreate(key string, maker func() C.PacketSender) (C.PacketSender, bool) {
 	item, loaded := t.mapping.LoadOrStoreFn(key, func() *entry {
 		return &entry{

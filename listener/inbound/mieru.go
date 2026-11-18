@@ -109,19 +109,12 @@ func (m *Mieru) UpdateUsers(config C.InboundConfig) (bool, error) {
 	if !ok || !sameMieruStatic(m.option, next) || len(next.Users) == 0 {
 		return false, nil
 	}
-	nextCopy := *next
-	nextCopy.Users = cloneMieruUsers(next.Users)
-	serverConfig, err := buildMieruServerConfig(&nextCopy, m.ports)
-	if err != nil {
-		return false, err
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.server.Store(serverConfig); err != nil {
-		return false, err
+	if equalMieruUsers(m.option.Users, next.Users) {
+		return true, nil
 	}
-	m.option.Users = cloneMieruUsers(next.Users)
-	return true, nil
+	return false, nil
 }
 
 func sameMieruStatic(left, right *MieruOption) bool {
@@ -132,12 +125,16 @@ func sameMieruStatic(left, right *MieruOption) bool {
 	return optionToString(leftCopy) == optionToString(rightCopy)
 }
 
-func cloneMieruUsers(users map[string]string) map[string]string {
-	copyUsers := make(map[string]string, len(users))
-	for user, password := range users {
-		copyUsers[user] = password
+func equalMieruUsers(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	return copyUsers
+	for user, password := range left {
+		if rightPass, ok := right[user]; !ok || rightPass != password {
+			return false
+		}
+	}
+	return true
 }
 
 var _ C.InboundListener = (*Mieru)(nil)
@@ -194,7 +191,11 @@ func buildMieruServerConfig(option *MieruOption, ports utils.IntRanges[uint16]) 
 	lc := option.ListenConfig()
 	listenIP := strings.TrimSpace(option.Listen)
 	if strings.EqualFold(listenIP, "all") || listenIP == "0.0.0.0,::" {
-		listenIP = "::"
+		if inbound.SupportsIPv6() {
+			listenIP = "::"
+		} else {
+			listenIP = "0.0.0.0"
+		}
 	}
 	return &mieruserver.ServerConfig{
 		Config: &mierupb.ServerConfig{

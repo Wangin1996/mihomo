@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/inbound"
@@ -27,20 +28,40 @@ import (
 
 	"github.com/metacubex/http"
 	"github.com/metacubex/mhurl"
-	vmess "github.com/metacubex/sing-vmess"
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/metadata"
 	"github.com/metacubex/tls"
 	"golang.org/x/exp/slices"
 )
 
+const defaultHandshakeTimeout = 15 * time.Second
+
+var handshakeTimeoutNs atomic.Int64
+
+func init() {
+	handshakeTimeoutNs.Store(int64(defaultHandshakeTimeout))
+}
+
+func handshakeTimeout() time.Duration {
+	return time.Duration(handshakeTimeoutNs.Load())
+}
+
+// SetHandshakeTimeout overrides the VMess handshake read timeout and returns a restore function.
+func SetHandshakeTimeout(d time.Duration) func() {
+	prev := handshakeTimeoutNs.Swap(int64(d))
+	return func() {
+		handshakeTimeoutNs.Store(prev)
+	}
+}
+
 type Listener struct {
-	closed    bool
-	config    LC.VmessServer
-	listeners []net.Listener
-	handler   *sing.ListenerHandler
-	service   *vmess.Service[string]
-	usersMu   sync.RWMutex
+	closed     bool
+	config     LC.VmessServer
+	listeners  []net.Listener
+	httpServer *http.Server
+	handler    *sing.ListenerHandler
+	service    *Service[string]
+	usersMu    sync.RWMutex
 }
 
 var _listener *Listener
@@ -52,9 +73,17 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			inbound.WithSpecialRules(""),
 		}
 		defer func() {
-			_listener = sl
+			if err == nil {
+				_listener = sl
+			}
 		}()
 	}
+	defer func() {
+		if err != nil && sl != nil {
+			_ = sl.Close()
+			sl = nil
+		}
+	}()
 	h, err := sing.NewListenerHandler(sing.ListenerConfig{
 		Tunnel:    tunnel,
 		Type:      C.VMESS,
@@ -73,7 +102,7 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		}
 	}
 
-	service := vmess.NewService[string](h, vmess.ServiceWithDisableHeaderProtection(), vmess.ServiceWithTimeFunc(ntp.Now))
+	service := NewService[string](h, ntp.Now, true)
 	err = service.UpdateUsers(
 		common.Map(config.Users, func(it LC.VmessUser) string {
 			return it.Username
@@ -95,9 +124,10 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 
 	sl = &Listener{config: config, handler: h, service: service}
 
-	httpServer := http.Server{
-		IdleTimeout: 30 * time.Second,
-		Protocols:   new(http.Protocols),
+	httpServer := &http.Server{
+		ReadHeaderTimeout: handshakeTimeout(),
+		IdleTimeout:       30 * time.Second,
+		Protocols:         new(http.Protocols),
 	}
 	tlsConfig := &tls.Config{Time: ntp.Now}
 	var shadowTLSBuilder *shadowtls.Builder
@@ -243,13 +273,17 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 		}
 	}
 
+	if httpServer.Handler != nil {
+		sl.httpServer = httpServer
+	}
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
 		//TCP
 		var l net.Listener
 		if config.MKCPConfig.Enable {
-			pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+			var pc net.PacketConn
+			pc, err = lc.ListenPacket(context.Background(), "udp", addr)
 			if err != nil {
 				return nil, err
 			}
@@ -278,8 +312,10 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 			l = tls.NewListener(l, tlsConfig)
 		}
 		if config.MekyaConfig.Enable {
+			rawL := l
 			l, err = mekya.Listen(context.Background(), l, config.MekyaConfig.Build())
 			if err != nil {
+				_ = rawL.Close()
 				return nil, err
 			}
 		}
@@ -291,8 +327,8 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 				return
 			}
 			for {
-				c, err := l.Accept()
-				if err != nil {
+				c, acceptErr := l.Accept()
+				if acceptErr != nil {
 					if sl.closed {
 						break
 					}
@@ -310,6 +346,11 @@ func New(config LC.VmessServer, lc C.InboundListenConfig, tunnel C.Tunnel, addit
 func (l *Listener) Close() error {
 	l.closed = true
 	var retErr error
+	if l.httpServer != nil {
+		if err := l.httpServer.Close(); err != nil {
+			retErr = err
+		}
+	}
 	for _, lis := range l.listeners {
 		err := lis.Close()
 		if err != nil {
@@ -319,15 +360,31 @@ func (l *Listener) Close() error {
 	l.usersMu.RLock()
 	service := l.service
 	l.usersMu.RUnlock()
-	err := service.Close()
-	if err != nil {
-		retErr = err
+	if service != nil {
+		err := service.Close()
+		if err != nil {
+			retErr = err
+		}
 	}
 	return retErr
 }
 
 func (l *Listener) Config() string {
+	l.usersMu.RLock()
+	defer l.usersMu.RUnlock()
 	return l.config.String()
+}
+
+func equalVmessUsers(left, right []LC.VmessUser) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (l *Listener) UpdateUsers(users []LC.VmessUser) error {
@@ -339,21 +396,19 @@ func (l *Listener) UpdateUsers(users []LC.VmessUser) error {
 		userUUIDs = append(userUUIDs, user.UUID)
 		alterIDs = append(alterIDs, user.AlterID)
 	}
-	service := vmess.NewService[string](l.handler, vmess.ServiceWithDisableHeaderProtection(), vmess.ServiceWithTimeFunc(ntp.Now))
-	if err := service.UpdateUsers(userNames, userUUIDs, alterIDs); err != nil {
-		return err
-	}
-	if err := service.Start(); err != nil {
-		return err
-	}
+
 	l.usersMu.Lock()
-	oldService := l.service
-	l.service = service
-	l.config.Users = append([]LC.VmessUser(nil), users...)
-	l.usersMu.Unlock()
-	if oldService != nil {
-		_ = oldService.Close()
+	defer l.usersMu.Unlock()
+	if equalVmessUsers(l.config.Users, users) {
+		return nil
 	}
+	if l.service == nil {
+		return errors.New("vmess service is not initialized")
+	}
+	if err := l.service.UpdateUsers(userNames, userUUIDs, alterIDs); err != nil {
+		return err
+	}
+	l.config.Users = append([]LC.VmessUser(nil), users...)
 	return nil
 }
 
@@ -365,11 +420,13 @@ func (l *Listener) AddrList() (addrList []net.Addr) {
 }
 
 func (l *Listener) HandleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
+	if l.service == nil {
+		_ = conn.Close()
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout()))
 	ctx := sing.WithAdditions(context.TODO(), additions...)
-	l.usersMu.RLock()
-	service := l.service
-	l.usersMu.RUnlock()
-	err := service.NewConnection(ctx, conn, metadata.Metadata{
+	err := l.service.NewConnection(ctx, conn, metadata.Metadata{
 		Protocol: "vmess",
 		Source:   metadata.SocksaddrFromNet(conn.RemoteAddr()),
 	})

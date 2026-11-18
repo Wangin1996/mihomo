@@ -109,6 +109,9 @@ func (s *ShadowSocks) Listen(tunnel C.Tunnel) error {
 
 // Close implements constant.InboundListener
 func (s *ShadowSocks) Close() error {
+	if s.l == nil {
+		return nil
+	}
 	return s.l.Close()
 }
 

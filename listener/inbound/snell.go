@@ -91,6 +91,9 @@ func (s *Snell) Listen(tunnel C.Tunnel) error {
 }
 
 func (s *Snell) Close() error {
+	if s.l == nil {
+		return nil
+	}
 	return s.l.Close()
 }
 

@@ -92,7 +92,7 @@ func (s *packetSender) processPacket(pc C.PacketConn, packet C.PacketAdapter) {
 		}
 
 		if !metadata.DstIP.IsValid() {
-			log.Warnln("[UDP] Destination ip not valid: %#v", metadata)
+			log.Warnln("[UDP] Destination ip not valid: type=%s src=%s dst=%s:%d", metadata.Type.String(), metadata.SourceAddress(), metadata.String(), metadata.DstPort)
 			return
 		}
 		s.AddMapping(originMetadata, metadata)

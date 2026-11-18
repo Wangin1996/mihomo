@@ -83,7 +83,7 @@ func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
 }
 
 func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
-	if tt.xboard != nil {
+	if tt.xboard != nil && !tt.xboard.IsUnlimited() {
 		return trackedReader{tracker: tt}, nil
 	}
 	return tt.Conn, []N.CountFunc{func(download int64) {
@@ -91,6 +91,7 @@ func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
 			tt.manager.PushDownloaded(download)
 		}
 		tt.DownloadTotal.Add(download)
+		tt.xboard.AddDownload(download)
 	}}
 }
 
@@ -123,7 +124,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 }
 
 func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
-	if tt.xboard != nil {
+	if tt.xboard != nil && !tt.xboard.IsUnlimited() {
 		return trackedWriter{tracker: tt}, nil
 	}
 	return tt.Conn, []N.CountFunc{func(upload int64) {
@@ -131,6 +132,7 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 			tt.manager.PushUploaded(upload)
 		}
 		tt.UploadTotal.Add(upload)
+		tt.xboard.AddUpload(upload)
 	}}
 }
 
@@ -244,6 +246,10 @@ func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 	ut.DownloadTotal.Add(download)
 	ut.xboard.AddDownload(download)
 	if limitErr := ut.xboard.Wait(len(data)); limitErr != nil {
+		if err == nil && put != nil {
+			put()
+			put = nil
+		}
 		err = limitErr
 	}
 	return
