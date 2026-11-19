@@ -1,7 +1,9 @@
 package inbound
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -12,14 +14,15 @@ import (
 
 type SnellOption struct {
 	BaseOption
-	Psk       string          `inbound:"psk"`
-	Version   int             `inbound:"version,omitempty"`
-	Mode      string          `inbound:"mode,omitempty"` // v6 only: default / unshaped / unsafe-raw
-	UDP       bool            `inbound:"udp,omitempty"`
-	ObfsOpts  SnellObfsOption `inbound:"obfs-opts,omitempty"`
-	ShadowTLS ShadowTLS       `inbound:"shadow-tls,omitempty"`
-	ResTLS    ResTLS          `inbound:"res-tls,omitempty"`
-	JLSConfig JLSConfig       `inbound:"jls-config,omitempty"`
+	Psk       string            `inbound:"psk,omitempty"`
+	Users     map[string]string `inbound:"users,omitempty"`
+	Version   int               `inbound:"version,omitempty"`
+	Mode      string            `inbound:"mode,omitempty"` // v6 only: default / unshaped / unsafe-raw
+	UDP       bool              `inbound:"udp,omitempty"`
+	ObfsOpts  SnellObfsOption   `inbound:"obfs-opts,omitempty"`
+	ShadowTLS ShadowTLS         `inbound:"shadow-tls,omitempty"`
+	ResTLS    ResTLS            `inbound:"res-tls,omitempty"`
+	JLSConfig JLSConfig         `inbound:"jls-config,omitempty"`
 }
 
 func (o SnellOption) Equal(config C.InboundConfig) bool {
@@ -49,6 +52,9 @@ func NewSnell(options *SnellOption) (*Snell, error) {
 	if options.Version < 1 || options.Version > 6 {
 		return nil, fmt.Errorf("snell inbound version %d is not supported", options.Version)
 	}
+	if options.Psk == "" && len(options.Users) == 0 {
+		return nil, errors.New("snell inbound requires psk or users")
+	}
 
 	return &Snell{
 		Base:   base,
@@ -56,6 +62,7 @@ func NewSnell(options *SnellOption) (*Snell, error) {
 		snell: LC.SnellServer{
 			Listen:    base.RawAddress(),
 			Psk:       options.Psk,
+			Users:     maps.Clone(options.Users),
 			Version:   options.Version,
 			Mode:      options.Mode,
 			UDP:       options.UDP,
@@ -99,4 +106,36 @@ func (s *Snell) Close() error {
 	return s.l.Close()
 }
 
+func (s *Snell) UpdateUsers(config C.InboundConfig) (bool, error) {
+	next, ok := config.(*SnellOption)
+	if !ok || !sameSnellStatic(s.config, next) || len(s.config.Users) == 0 || len(next.Users) == 0 {
+		return false, nil
+	}
+	if s.config.Version == 6 && s.config.Mode == "unsafe-raw" && len(next.Users) > 1 {
+		return false, nil
+	}
+	listener, ok := s.l.(*snell.Listener)
+	if !ok || listener == nil {
+		return false, nil
+	}
+	users := maps.Clone(next.Users)
+	if err := listener.UpdateUsers(users); err != nil {
+		return false, err
+	}
+	s.config.Psk = next.Psk
+	s.config.Users = users
+	s.snell.Psk = next.Psk
+	s.snell.Users = maps.Clone(users)
+	return true, nil
+}
+
+func sameSnellStatic(left, right *SnellOption) bool {
+	leftCopy := *left
+	rightCopy := *right
+	leftCopy.Users = nil
+	rightCopy.Users = nil
+	return optionToString(leftCopy) == optionToString(rightCopy)
+}
+
 var _ C.InboundListener = (*Snell)(nil)
+var _ C.InboundUserUpdater = (*Snell)(nil)

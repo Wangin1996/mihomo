@@ -6,10 +6,12 @@ import (
 	"crypto/rand"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/listener/inbound"
 	"github.com/metacubex/mihomo/transport/jls"
@@ -329,4 +331,271 @@ func TestInboundSnell_V6_Validation(t *testing.T) {
 	assert.Error(t, newInbound(inbound.SnellOption{Version: 4, Mode: "unshaped"}), "mode is v6 only")
 	assert.Error(t, newInbound(inbound.SnellOption{Version: 7}), "unknown version must be rejected")
 	assert.NoError(t, newInbound(inbound.SnellOption{Version: 6, Mode: "unshaped"}))
+}
+
+func TestInboundSnell_MultiUsers(t *testing.T) {
+	t.Run("Validation", func(t *testing.T) {
+		t.Parallel()
+		_, err := inbound.NewSnell(&inbound.SnellOption{
+			BaseOption: inbound.BaseOption{NameStr: "snell_missing_psk", Listen: "127.0.0.1", Port: "0"},
+			Version:    5,
+		})
+		assert.Error(t, err)
+
+		for _, tc := range []struct {
+			name    string
+			version int
+			mode    string
+			users   map[string]string
+		}{
+			{"EmptyUserPSK", 5, "", map[string]string{"user1": ""}},
+			{"V6ShortUserPSK", 6, "default", map[string]string{"user1": "short"}},
+			{"V6UnsafeRawMultiUsers", 6, "unsafe-raw", map[string]string{
+				"user1": utils.NewUUIDV4().String(),
+				"user2": utils.NewUUIDV4().String(),
+			}},
+		} {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				in, err := inbound.NewSnell(&inbound.SnellOption{
+					BaseOption: inbound.BaseOption{NameStr: "snell_val", Listen: "127.0.0.1", Port: "0"},
+					Version:    tc.version,
+					Mode:       tc.mode,
+					Users:      tc.users,
+				})
+				if !assert.NoError(t, err) {
+					return
+				}
+				tunnel := NewHttpTestTunnel()
+				defer tunnel.Close()
+				err = in.Listen(tunnel)
+				if !assert.Error(t, err) {
+					_ = in.Close()
+				}
+			})
+		}
+	})
+
+	cases := []struct {
+		name    string
+		version int
+		mode    string
+	}{
+		{"v4", 4, ""},
+		{"v5", 5, ""},
+		{"v6-default", 6, "default"},
+		{"v6-unshaped", 6, "unshaped"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			psk1 := utils.NewUUIDV4().String()
+			psk2 := utils.NewUUIDV4().String()
+			psk3 := utils.NewUUIDV4().String()
+			unknownPSK := utils.NewUUIDV4().String()
+
+			baseOpt := inbound.BaseOption{
+				NameStr: "snell_multi_" + tc.name,
+				Listen:  "127.0.0.1",
+				Port:    "0",
+			}
+			inOpt := &inbound.SnellOption{
+				BaseOption: baseOpt,
+				Users: map[string]string{
+					"user1": psk1,
+					"user2": psk2,
+				},
+				Version: tc.version,
+				Mode:    tc.mode,
+				UDP:     true,
+			}
+			in, err := inbound.NewSnell(inOpt)
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			tunnel := NewHttpTestTunnel()
+			defer tunnel.Close()
+
+			var mu sync.Mutex
+			var tcpInUsers []string
+			var udpInUsers []string
+
+			origHandleTCP := tunnel.HandleTCPConnFn
+			tunnel.HandleTCPConnFn = func(conn net.Conn, metadata *C.Metadata) {
+				mu.Lock()
+				tcpInUsers = append(tcpInUsers, metadata.InUser)
+				mu.Unlock()
+				origHandleTCP(conn, metadata)
+			}
+			tunnel.HandleUDPPacketFn = func(packet C.UDPPacket, metadata *C.Metadata) {
+				defer packet.Drop()
+				mu.Lock()
+				udpInUsers = append(udpInUsers, metadata.InUser)
+				mu.Unlock()
+				_, err := packet.WriteBack(packet.Data(), metadata.UDPAddr())
+				assert.NoError(t, err)
+			}
+
+			takeTCPUsers := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				out := tcpInUsers
+				tcpInUsers = nil
+				return out
+			}
+			takeUDPUsers := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				out := udpInUsers
+				udpInUsers = nil
+				return out
+			}
+
+			if !assert.NoError(t, in.Listen(tunnel)) {
+				return
+			}
+			defer in.Close()
+
+			origAddr := in.Address()
+			addrPort, err := netip.ParseAddrPort(origAddr)
+			if !assert.NoError(t, err) {
+				return
+			}
+
+			newOutbound := func(psk string) (*outbound.Snell, error) {
+				opt := outbound.SnellOption{
+					Name:    "snell_outbound",
+					Server:  addrPort.Addr().String(),
+					Port:    int(addrPort.Port()),
+					Psk:     psk,
+					Version: tc.version,
+					Mode:    tc.mode,
+					UDP:     true,
+				}
+				opt.DialerForAPI = tunnel.NewDialer()
+				opt.TunnelForAPI = tunnel
+				return outbound.NewSnell(opt)
+			}
+
+			verifyTCP := func(t *testing.T, expectedUser, psk string) {
+				t.Helper()
+				out, err := newOutbound(psk)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer out.Close()
+
+				tunnel.DoTest(t, out)
+
+				users := takeTCPUsers()
+				assert.NotEmpty(t, users)
+				for _, u := range users {
+					assert.Equal(t, expectedUser, u)
+				}
+			}
+
+			verifyUDP := func(t *testing.T, expectedUser, psk string) {
+				t.Helper()
+				out, err := newOutbound(psk)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer out.Close()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				target := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53}
+				pc, err := out.ListenPacketContext(ctx, &C.Metadata{
+					NetWork: C.UDP,
+					DstIP:   netip.MustParseAddr("127.0.0.1"),
+					DstPort: 53,
+				})
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer pc.Close()
+
+				msg := []byte("hello-snell-udp-" + expectedUser)
+				_, err = pc.WriteTo(msg, target)
+				if !assert.NoError(t, err) {
+					return
+				}
+				buf := make([]byte, 2048)
+				if !assert.NoError(t, pc.SetReadDeadline(time.Now().Add(5*time.Second))) {
+					return
+				}
+				n, from, err := pc.ReadFrom(buf)
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Equal(t, target.String(), from.String())
+				assert.Equal(t, msg, buf[:n])
+
+				users := takeUDPUsers()
+				assert.NotEmpty(t, users)
+				for _, u := range users {
+					assert.Equal(t, expectedUser, u)
+				}
+			}
+
+			verifyRejected := func(t *testing.T, psk string) {
+				t.Helper()
+				out, err := newOutbound(psk)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer out.Close()
+
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				conn, err := out.DialContext(ctx, &C.Metadata{NetWork: C.TCP, DstIP: remoteAddr, DstPort: 80})
+				if err == nil {
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					_, _ = conn.Write([]byte("GET / HTTP/1.1\r\nHost: 1.2.3.4\r\n\r\n"))
+					_, err = conn.Read(make([]byte, 1))
+					_ = conn.Close()
+				}
+				assert.Error(t, err)
+				assert.Empty(t, takeTCPUsers())
+			}
+
+			t.Run("user1", func(t *testing.T) {
+				verifyTCP(t, "user1", psk1)
+				verifyUDP(t, "user1", psk1)
+			})
+			t.Run("user2", func(t *testing.T) {
+				verifyTCP(t, "user2", psk2)
+				verifyUDP(t, "user2", psk2)
+			})
+			t.Run("UnknownPSK", func(t *testing.T) {
+				verifyRejected(t, unknownPSK)
+			})
+			t.Run("UpdateUsers", func(t *testing.T) {
+				nextOpt := &inbound.SnellOption{
+					BaseOption: baseOpt,
+					Users: map[string]string{
+						"user2": psk2,
+						"user3": psk3,
+					},
+					Version: tc.version,
+					Mode:    tc.mode,
+					UDP:     true,
+				}
+				updated, err := in.UpdateUsers(nextOpt)
+				assert.NoError(t, err)
+				assert.True(t, updated)
+				assert.Equal(t, origAddr, in.Address(), "listener address must not change on in-place UpdateUsers")
+
+				verifyTCP(t, "user3", psk3)
+				verifyUDP(t, "user3", psk3)
+				verifyTCP(t, "user2", psk2)
+				verifyRejected(t, psk1)
+			})
+		})
+	}
 }

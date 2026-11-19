@@ -5,6 +5,7 @@ import "encoding/json"
 type SnellServer struct {
 	Listen    string
 	Psk       string
+	Users     map[string]string `yaml:"users" json:"users,omitempty"`
 	Version   int
 	Mode      string // v6 only: default / unshaped / unsafe-raw
 	UDP       bool
