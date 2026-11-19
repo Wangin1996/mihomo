@@ -3,6 +3,7 @@ package sing_shadowsocks
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"strings"
@@ -133,14 +134,13 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 
 	usernames := make([]string, 0, len(config.Users))
 	passwords := make([]string, 0, len(config.Users))
-	for _, user := range config.Users {
-		usernames = append(usernames, user.Username)
-		passwords = append(passwords, user.Password)
-	}
-
 	defaultUser := ""
-	if config.Cipher == "2022-blake3-chacha20-poly1305" && len(config.Users) == 1 {
-		defaultUser = config.Users[0].Username
+	for username, password := range config.Users {
+		usernames = append(usernames, username)
+		passwords = append(passwords, password)
+		if config.Cipher == "2022-blake3-chacha20-poly1305" && len(config.Users) == 1 {
+			defaultUser = username
+		}
 	}
 	handler := &ssHandler{
 		ListenerHandler: h,
@@ -158,6 +158,8 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	case common.Contains(shadowaead.List, config.Cipher):
 		if len(config.Users) == 0 {
 			initialService, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, handler)
+		} else if config.Password != "" {
+			err = fmt.Errorf("shadowsocks: password must be empty when users is set for method: %s", config.Cipher)
 		} else {
 			var service *shadowaead.MultiService[string]
 			service, err = shadowaead.NewMultiService[string](config.Cipher, udpTimeout, handler)
@@ -371,12 +373,12 @@ func (l *Listener) Config() string {
 	return l.config.String()
 }
 
-func (l *Listener) UpdateUsers(users []LC.ShadowsocksUser) error {
+func (l *Listener) UpdateUsers(users map[string]string) error {
 	usernames := make([]string, 0, len(users))
 	passwords := make([]string, 0, len(users))
-	for _, user := range users {
-		usernames = append(usernames, user.Username)
-		passwords = append(passwords, user.Password)
+	for username, password := range users {
+		usernames = append(usernames, username)
+		passwords = append(passwords, password)
 	}
 	l.updateMu.Lock()
 	defer l.updateMu.Unlock()
@@ -399,7 +401,7 @@ func (l *Listener) UpdateUsers(users []LC.ShadowsocksUser) error {
 		return fmt.Errorf("shadowsocks listener does not support multi-user updates")
 	}
 	l.service.Store(&serviceHolder{svc: next})
-	l.config.Users = append([]LC.ShadowsocksUser(nil), users...)
+	l.config.Users = maps.Clone(users)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"errors"
+	"maps"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -13,8 +14,8 @@ import (
 type ShadowSocksOption struct {
 	BaseOption
 	Password   string            `inbound:"password,omitempty"`
+	Users      map[string]string `inbound:"users,omitempty"`
 	Cipher     string            `inbound:"cipher"`
-	Users      []ShadowSocksUser `inbound:"users,omitempty"`
 	UDP        bool              `inbound:"udp,omitempty"`
 	MuxOption  MuxOption         `inbound:"mux-option,omitempty"`
 	ShadowTLS  ShadowTLS         `inbound:"shadow-tls,omitempty"`
@@ -22,11 +23,6 @@ type ShadowSocksOption struct {
 	JLSConfig  JLSConfig         `inbound:"jls-config,omitempty"`
 	KcpTun     KcpTun            `inbound:"kcp-tun,omitempty"`
 	SimpleObfs SimpleObfs        `inbound:"simple-obfs,omitempty"`
-}
-
-type ShadowSocksUser struct {
-	Username string `inbound:"username"`
-	Password string `inbound:"password"`
 }
 
 type SimpleObfs struct {
@@ -60,10 +56,6 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 	if options.Password == "" && len(options.Users) == 0 {
 		return nil, errors.New("shadowsocks: missing password")
 	}
-	users := make([]LC.ShadowsocksUser, len(options.Users))
-	for i, user := range options.Users {
-		users[i] = LC.ShadowsocksUser{Username: user.Username, Password: user.Password}
-	}
 	return &ShadowSocks{
 		Base:   base,
 		config: options,
@@ -71,8 +63,8 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 			Enable:     true,
 			Listen:     base.RawAddress(),
 			Password:   options.Password,
+			Users:      maps.Clone(options.Users),
 			Cipher:     options.Cipher,
-			Users:      users,
 			Udp:        options.UDP,
 			MuxOption:  options.MuxOption.Build(),
 			ShadowTLS:  options.ShadowTLS.Build(),
@@ -128,21 +120,14 @@ func (s *ShadowSocks) UpdateUsers(config C.InboundConfig) (bool, error) {
 	if !ok || listener == nil {
 		return false, nil
 	}
-	users := append([]ShadowSocksUser(nil), next.Users...)
-	listenerUsers := make([]LC.ShadowsocksUser, 0, len(users))
-	for _, user := range users {
-		listenerUsers = append(listenerUsers, LC.ShadowsocksUser{
-			Username: user.Username,
-			Password: user.Password,
-		})
-	}
-	if err := listener.UpdateUsers(listenerUsers); err != nil {
+	users := maps.Clone(next.Users)
+	if err := listener.UpdateUsers(users); err != nil {
 		return false, err
 	}
 	s.config.Password = next.Password
 	s.config.Users = users
 	s.ss.Password = next.Password
-	s.ss.Users = listenerUsers
+	s.ss.Users = maps.Clone(users)
 	return true, nil
 }
 
@@ -151,10 +136,6 @@ func sameShadowSocksStatic(left, right *ShadowSocksOption) bool {
 	rightCopy := *right
 	leftCopy.Users = nil
 	rightCopy.Users = nil
-	if len(left.Users) > 0 && len(right.Users) > 0 && !strings.HasPrefix(left.Cipher, "2022-blake3-") {
-		leftCopy.Password = ""
-		rightCopy.Password = ""
-	}
 	return optionToString(leftCopy) == optionToString(rightCopy)
 }
 

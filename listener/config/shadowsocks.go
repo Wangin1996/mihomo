@@ -10,8 +10,8 @@ type ShadowsocksServer struct {
 	Enable     bool
 	Listen     string
 	Password   string
+	Users      map[string]string `yaml:"users" json:"users,omitempty"`
 	Cipher     string
-	Users      []ShadowsocksUser `yaml:"users" json:"users,omitempty"`
 	Udp        bool
 	MuxOption  sing.MuxOption `yaml:"mux-option" json:"mux-option,omitempty"`
 	ShadowTLS  ShadowTLS      `yaml:"shadow-tls" json:"shadow-tls,omitempty"`
@@ -19,11 +19,6 @@ type ShadowsocksServer struct {
 	JLSConfig  JLSConfig      `yaml:"jls-config" json:"jls-config,omitempty"`
 	KcpTun     KcpTun         `yaml:"kcp-tun" json:"kcp-tun,omitempty"`
 	SimpleObfs SimpleObfs     `yaml:"simple-obfs" json:"simple-obfs,omitempty"`
-}
-
-type ShadowsocksUser struct {
-	Username string `yaml:"username" json:"username"`
-	Password string `yaml:"password" json:"password"`
 }
 
 type SimpleObfs struct {

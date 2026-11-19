@@ -132,8 +132,7 @@ func TestInboundUpdateUsersSupportsAddAndRemove(t *testing.T) {
 		opt1 := &inbound.ShadowSocksOption{
 			BaseOption: inbound.BaseOption{NameStr: "ss-test", Listen: "127.0.0.1", Port: "0"},
 			Cipher:     "aes-128-gcm",
-			Password:   u1,
-			Users:      []inbound.ShadowSocksUser{{Username: u1, Password: u1}},
+			Users:      map[string]string{u1: u1},
 		}
 		l, err := inbound.NewShadowSocks(opt1)
 		if err != nil {
@@ -146,13 +145,12 @@ func TestInboundUpdateUsersSupportsAddAndRemove(t *testing.T) {
 		addrBefore := l.Address()
 
 		opt2 := *opt1
-		opt2.Users = []inbound.ShadowSocksUser{{Username: u1, Password: u1}, {Username: u2, Password: u2}}
+		opt2.Users = map[string]string{u1: u1, u2: u2}
 		if ok, err := l.UpdateUsers(&opt2); err != nil || !ok {
 			t.Fatalf("add user failed: ok=%v err=%v", ok, err)
 		}
 		opt3 := *opt1
-		opt3.Password = u2
-		opt3.Users = []inbound.ShadowSocksUser{{Username: u2, Password: u2}}
+		opt3.Users = map[string]string{u2: u2}
 		if ok, err := l.UpdateUsers(&opt3); err != nil || !ok {
 			t.Fatalf("remove user failed: ok=%v err=%v", ok, err)
 		}
@@ -523,8 +521,7 @@ func TestShadowsocksSilentHandshakeDoesNotDeadlockUpdateUsers(t *testing.T) {
 	opt1 := &inbound.ShadowSocksOption{
 		BaseOption: inbound.BaseOption{NameStr: "ss-deadlock-test", Listen: "127.0.0.1", Port: "0"},
 		Cipher:     "aes-128-gcm",
-		Password:   u1,
-		Users:      []inbound.ShadowSocksUser{{Username: u1, Password: u1}},
+		Users:      map[string]string{u1: u1},
 	}
 	l, err := inbound.NewShadowSocks(opt1)
 	if err != nil {
@@ -548,7 +545,7 @@ func TestShadowsocksSilentHandshakeDoesNotDeadlockUpdateUsers(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		opt2 := *opt1
-		opt2.Users = []inbound.ShadowSocksUser{{Username: u1, Password: u1}, {Username: u2, Password: u2}}
+		opt2.Users = map[string]string{u1: u1, u2: u2}
 		ok, uErr := l.UpdateUsers(&opt2)
 		if uErr == nil && !ok {
 			uErr = fmt.Errorf("UpdateUsers returned ok=false")

@@ -269,14 +269,15 @@ func TestInboundShadowSocks_MultiUsers(t *testing.T) {
 			name     string
 			cipher   string
 			password string
-			users    []inbound.ShadowSocksUser
+			users    map[string]string
 		}{
-			{"None", shadowsocks.MethodNone, "", []inbound.ShadowSocksUser{{Username: "user1", Password: "password"}}},
-			{"Stream", shadowstream.List[0], "", []inbound.ShadowSocksUser{{Username: "user1", Password: "password"}}},
-			{"2022Chacha20", "2022-blake3-chacha20-poly1305", shadowsocksPassword32, []inbound.ShadowSocksUser{{Username: "user1", Password: shadowsocksPassword32}, {Username: "user2", Password: shadowsocksPassword32}}},
-			{"2022MissingServerPassword", "2022-blake3-aes-128-gcm", "", []inbound.ShadowSocksUser{{Username: "user1", Password: shadowsocksPassword16}}},
-			{"2022ShortUserKey", "2022-blake3-aes-256-gcm", shadowsocksPassword32, []inbound.ShadowSocksUser{{Username: "user1", Password: shadowsocksPassword16}}},
-			{"AEADEmptyUserPassword", "aes-128-gcm", "", []inbound.ShadowSocksUser{{Username: "user1", Password: ""}}},
+			{"None", shadowsocks.MethodNone, "", map[string]string{"user1": "password"}},
+			{"Stream", shadowstream.List[0], "", map[string]string{"user1": "password"}},
+			{"2022Chacha20", "2022-blake3-chacha20-poly1305", shadowsocksPassword32, map[string]string{"user1": shadowsocksPassword32, "user2": shadowsocksPassword32}},
+			{"2022MissingServerPassword", "2022-blake3-aes-128-gcm", "", map[string]string{"user1": shadowsocksPassword16}},
+			{"2022ShortUserKey", "2022-blake3-aes-256-gcm", shadowsocksPassword32, map[string]string{"user1": shadowsocksPassword16}},
+			{"AEADWithPassword", "aes-128-gcm", "password", map[string]string{"user1": "password1"}},
+			{"AEADEmptyUserPassword", "aes-128-gcm", "", map[string]string{"user1": ""}},
 		}
 		for _, test := range tests {
 			test := test
@@ -324,9 +325,9 @@ func TestInboundShadowSocks_MultiUsers(t *testing.T) {
 			if is2022 {
 				serverPassword = newShadowSocksKey(cipher)
 			}
-			users := []inbound.ShadowSocksUser{
-				{Username: "user1", Password: newShadowSocksKey(cipher)},
-				{Username: "user2", Password: newShadowSocksKey(cipher)},
+			users := map[string]string{
+				"user1": newShadowSocksKey(cipher),
+				"user2": newShadowSocksKey(cipher),
 			}
 			inboundOptions := inbound.ShadowSocksOption{
 				BaseOption: inbound.BaseOption{
@@ -390,8 +391,8 @@ func TestInboundShadowSocks_MultiUsers(t *testing.T) {
 				return outbound.NewShadowSocks(outboundOptions)
 			}
 
-			for _, user := range users {
-				username, password := user.Username, user.Password
+			for username, password := range users {
+				username, password := username, password
 				t.Run(username, func(t *testing.T) {
 					out, err := newOutbound(password)
 					if !assert.NoError(t, err) {
