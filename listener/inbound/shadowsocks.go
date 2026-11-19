@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"errors"
 	"strings"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -11,7 +12,7 @@ import (
 
 type ShadowSocksOption struct {
 	BaseOption
-	Password   string            `inbound:"password"`
+	Password   string            `inbound:"password,omitempty"`
 	Cipher     string            `inbound:"cipher"`
 	Users      []ShadowSocksUser `inbound:"users,omitempty"`
 	UDP        bool              `inbound:"udp,omitempty"`
@@ -55,6 +56,9 @@ func NewShadowSocks(options *ShadowSocksOption) (*ShadowSocks, error) {
 	base, err := NewBase(&options.BaseOption)
 	if err != nil {
 		return nil, err
+	}
+	if options.Password == "" && len(options.Users) == 0 {
+		return nil, errors.New("shadowsocks: missing password")
 	}
 	users := make([]LC.ShadowsocksUser, len(options.Users))
 	for i, user := range options.Users {

@@ -150,7 +150,11 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 	var initialService shadowsocksService
 	switch {
 	case config.Cipher == shadowsocks.MethodNone:
-		initialService = shadowsocks.NewNoneService(udpTimeout, handler)
+		if len(config.Users) > 0 {
+			err = fmt.Errorf("shadowsocks: users is not supported for method: %s", config.Cipher)
+		} else {
+			initialService = shadowsocks.NewNoneService(udpTimeout, handler)
+		}
 	case common.Contains(shadowaead.List, config.Cipher):
 		if len(config.Users) == 0 {
 			initialService, err = shadowaead.NewService(config.Cipher, nil, config.Password, udpTimeout, handler)
@@ -163,7 +167,9 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 			}
 		}
 	case common.Contains(shadowaead_2022.List, config.Cipher):
-		if len(config.Users) == 0 || config.Cipher == "2022-blake3-chacha20-poly1305" {
+		if config.Cipher == "2022-blake3-chacha20-poly1305" && len(config.Users) > 1 {
+			err = fmt.Errorf("shadowsocks: users is not supported for method: %s", config.Cipher)
+		} else if len(config.Users) == 0 || config.Cipher == "2022-blake3-chacha20-poly1305" {
 			initialService, err = shadowaead_2022.NewServiceWithPassword(config.Cipher, config.Password, udpTimeout, handler, ntp.Now)
 		} else {
 			var service *shadowaead_2022.MultiService[string]
@@ -174,8 +180,12 @@ func New(config LC.ShadowsocksServer, lc C.InboundListenConfig, tunnel C.Tunnel,
 			}
 		}
 	default:
-		sl = nil
-		return embedSS.New(config, lc, tunnel, additions...)
+		if len(config.Users) > 0 {
+			err = fmt.Errorf("shadowsocks: users is not supported for method: %s", config.Cipher)
+		} else {
+			sl = nil
+			return embedSS.New(config, lc, tunnel, additions...)
+		}
 	}
 	if err != nil {
 		return nil, err
